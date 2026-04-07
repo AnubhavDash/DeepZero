@@ -1,0 +1,103 @@
+rules:
+  - id: ghidra-mmmapiospace-user-controlled
+    languages: [c]
+    severity: ERROR
+    message: >
+      MmMapIoSpace called with parameters derived from user input.
+      This can allow a user-mode attacker to map arbitrary physical
+      memory into kernel virtual space, bypassing all protections.
+    metadata:
+      vuln_class: "Physical Memory R/W"
+      cwe: "CWE-119"
+      exploitability: "CRITICAL"
+    pattern: |
+      MmMapIoSpace(..., ..., ...);
+
+  - id: ghidra-zwmapviewofsection-physmem
+    languages: [c]
+    severity: ERROR
+    message: >
+      ZwMapViewOfSection used to map a section object. If the
+      section is \Device\PhysicalMemory and offset/size come from
+      user input, this gives arbitrary physical memory read/write.
+    metadata:
+      vuln_class: "Physical Memory R/W"
+      cwe: "CWE-119"
+      exploitability: "CRITICAL"
+    pattern: |
+      ZwMapViewOfSection(...);
+
+  - id: ghidra-rtlcopymemory-user-length
+    languages: [c]
+    severity: ERROR
+    message: >
+      RtlCopyMemory/memcpy with length potentially derived from
+      user-controlled IOCTL input buffer. Classic buffer overflow
+      if the destination is a fixed-size kernel buffer.
+    metadata:
+      vuln_class: "Arbitrary Kernel Memory R/W"
+      cwe: "CWE-120"
+      exploitability: "HIGH"
+    patterns:
+      - pattern-either:
+          - pattern: memcpy($DST, $SRC, $LEN);
+          - pattern: RtlCopyMemory($DST, $SRC, $LEN);
+          - pattern: memmove($DST, $SRC, $LEN);
+
+  - id: ghidra-irp-buffer-derived-write
+    languages: [c]
+    severity: ERROR
+    message: >
+      Write through a pointer derived from the IRP SystemBuffer (offset 0x18).
+      If the user controls both the destination pointer and the value, this
+      is a write-what-where primitive.
+    metadata:
+      vuln_class: "Arbitrary Kernel Memory R/W"
+      cwe: "CWE-822"
+      exploitability: "HIGH"
+    patterns:
+      - pattern: |
+          $BUF = *(... + 0x18);
+          ...
+          *$PTR = ...;
+
+  - id: ghidra-mmcopyvirtualmemory
+    languages: [c]
+    severity: ERROR
+    message: >
+      MmCopyVirtualMemory called, enabling arbitrary cross-process memory
+      read/write if source/dest process and addresses come from user input.
+    metadata:
+      vuln_class: "Arbitrary Kernel Memory R/W"
+      cwe: "CWE-119"
+      exploitability: "CRITICAL"
+    pattern: |
+      MmCopyVirtualMemory(...);
+
+  - id: ghidra-mmcopymemory
+    languages: [c]
+    severity: ERROR
+    message: >
+      MmCopyMemory called with potentially user-controlled address/size,
+      enabling arbitrary kernel memory reads.
+    metadata:
+      vuln_class: "Arbitrary Kernel Memory R/W"
+      cwe: "CWE-119"
+      exploitability: "CRITICAL"
+    pattern: |
+      MmCopyMemory(...);
+
+  - id: ghidra-pslookup-keattach-chain
+    languages: [c]
+    severity: ERROR
+    message: >
+      PsLookupProcessByProcessId followed by KeStackAttachProcess. Classic
+      process manipulation primitive for cross-process memory operations.
+    metadata:
+      vuln_class: "Process Manipulation"
+      cwe: "CWE-284"
+      exploitability: "HIGH"
+    pattern: |
+      PsLookupProcessByProcessId(...);
+      ...
+      KeStackAttachProcess(...);

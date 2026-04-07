@@ -1,0 +1,43 @@
+rules:
+  - id: ghidra-readmsr-user-controlled
+    languages: [c]
+    severity: ERROR
+    message: >
+      __readmsr called with a register index that may be user-controlled.
+      Unrestricted MSR access can leak sensitive CPU state or, with
+      __writemsr, allow arbitrary code execution via LSTAR hijacking.
+    metadata:
+      vuln_class: "MSR / Port I/O Access"
+      cwe: "CWE-284"
+      exploitability: "CRITICAL"
+    pattern: |
+      __readmsr(...);
+
+  - id: ghidra-writemsr-user-controlled
+    languages: [c]
+    severity: ERROR
+    message: >
+      __writemsr called with user-controlled register index and value.
+      Writing arbitrary MSR values (especially IA32_LSTAR at 0xC0000082)
+      can redirect the syscall handler to attacker-controlled code.
+    metadata:
+      vuln_class: "MSR / Port I/O Access"
+      cwe: "CWE-284"
+      exploitability: "CRITICAL"
+    pattern: |
+      __writemsr(..., ...);
+
+  - id: ghidra-port-io-user-controlled
+    languages: [c]
+    severity: WARNING
+    message: >
+      Direct I/O port access with potentially user-controlled port
+      number. Can be used to interact with hardware directly.
+    metadata:
+      vuln_class: "MSR / Port I/O Access"
+      cwe: "CWE-284"
+    pattern-either:
+      - pattern: READ_PORT_UCHAR(...);
+      - pattern: WRITE_PORT_UCHAR(..., ...);
+      - pattern: READ_PORT_ULONG(...);
+      - pattern: WRITE_PORT_ULONG(..., ...);

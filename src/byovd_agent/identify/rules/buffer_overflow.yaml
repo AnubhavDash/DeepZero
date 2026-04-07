@@ -1,0 +1,48 @@
+rules:
+  - id: ghidra-stack-buffer-no-length-check
+    languages: [c]
+    severity: ERROR
+    message: >
+      Stack buffer (local variable) used as destination for a copy
+      operation where the length may come from IOCTL input. Classic
+      kernel stack buffer overflow leading to privilege escalation.
+    metadata:
+      vuln_class: "Arbitrary Kernel Memory R/W"
+      cwe: "CWE-121"
+      exploitability: "HIGH"
+    patterns:
+      - pattern: |
+          $TYPE $BUF[$SIZE];
+          ...
+          memcpy($BUF, ..., ...);
+      - pattern-not-inside: |
+          if ($LEN > $MAX) { ... }
+
+  - id: ghidra-missing-output-length-check
+    languages: [c]
+    severity: WARNING
+    message: >
+      IoStatus.Information set without validating against
+      OutputBufferLength. Can leak kernel memory to user mode.
+    metadata:
+      vuln_class: "Arbitrary Kernel Memory R/W"
+      cwe: "CWE-200"
+    pattern: |
+      *(... + 0x38) = ...;
+
+  - id: ghidra-no-input-length-validation
+    languages: [c]
+    severity: WARNING
+    message: >
+      IOCTL handler does not appear to check InputBufferLength
+      before accessing SystemBuffer contents. May allow reading
+      beyond the user-supplied buffer.
+    metadata:
+      vuln_class: "Arbitrary Kernel Memory R/W"
+      cwe: "CWE-120"
+    patterns:
+      - pattern: $X = *(... + 0x18);
+      - pattern-not-inside: |
+          if (... < ...) {
+            ...
+          }
