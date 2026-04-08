@@ -1,0 +1,96 @@
+# tool resolution:
+#   bare name                = built-in tool (metadata_filter, generic_llm, top_k, etc.)
+#   dir/file.py              = project tool, relative to tools/ directory
+#   dir/file.py:ClassName    = specific class in that file
+#
+# tool types:
+#   map    = 1:1 sample processing (filters, decompilers, LLM, commands)
+#   reduce = N:1 synchronization barrier (top-k selection, global ranking)
+#   batch  = N:batch external process (semgrep bulk scan)
+
+name: loldrivers
+description: windows kernel driver vulnerability research pipeline
+version: "2.0"
+
+model: vertex_ai/gemini-2.5-pro
+
+settings:
+  work_dir: work
+  max_workers: 4
+
+tools:
+  ghidra:
+    install_dir: ${GHIDRA_INSTALL_DIR}
+    java_home: ${JAVA_HOME:-}
+
+stages:
+  # discover PE files, parse headers, extract driver metadata
+  - name: discover
+    tool: pe_ingest/pe_ingest.py
+    config:
+      extensions: [".sys"]
+      recursive: true
+      subsystem_filter: [1]
+      subdirs:
+        - DP_Chipset
+        - DP_LAN_Intel
+        - DP_LAN_Realtek
+        - DP_LAN_Others
+        - DP_WLAN
+        - DP_MassStorage
+        - DP_CardReader
+        - DP_wBluetooth
+        - DP_Touchpad
+        - DP_Biometric
+        - DP_xUSB
+        - DP_Vendor
+
+  # filter to kernel drivers with IOCTL attack surface + dedup
+  - name: kernel_filter
+    tool: metadata_filter
+    config:
+      require:
+        is_kernel_driver: true
+        has_ioctl_surface: true
+      dedup_field: sha256
+
+  # exclude drivers already in the loldrivers.io database
+  - name: loldrivers_filter
+    tool: loldrivers_filter/loldrivers_filter.py
+
+  # decompile with ghidra
+  - name: decompile
+    tool: ghidra_decompile/ghidra_decompile.py
+    parallel: 1
+    timeout: 600
+    config:
+      strategy: extract_dispatch.py
+      max_functions: 60
+      max_depth: 4
+
+  # semgrep batch scan for driver vulns
+  - name: semgrep_scanner
+    tool: semgrep_scanner
+    config:
+      min_findings: 1
+      rules_dir: pipelines/loldrivers/rules
+
+  # pick top 10 candidates by semgrep finding count
+  - name: pick_top_10
+    tool: top_k
+    config:
+      metric_path: "semgrep_scanner.finding_count"
+      keep_top: 10
+      sort_order: desc
+
+  # llm deep analysis — only the top 10 survivors
+  - name: assess
+    tool: generic_llm
+    parallel: 2
+    on_failure: skip
+    config:
+      prompt: pipelines/loldrivers/assessment.j2
+      output_file: assessment.md
+      classify_by: "\\[VULNERABLE\\]|\\[SAFE\\]"
+      max_context_tokens: 900000
+      max_retries: 3

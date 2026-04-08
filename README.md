@@ -1,92 +1,87 @@
 # DeepZero
 
-**DeepZero** is an automated, AI-powered framework for discovering zero-day vulnerabilities in Windows kernel drivers at massive scale. 
+> Configurable, agentic vulnerability research pipeline
 
-**Read the disclosure blog post:** [Finding a Zero-Day in ASUS Drivers with DeepAgents, LangChain, and Vertex AI](https://blog.ahmadz.ai/automated-deepagents-langchain-pipeline-for-zero-days/)
+DeepZero is an extensible, breadth-first framework for automated binary analysis. It orchestrates configurable toolchains—file discovery, GHIDRA decompilation, Semgrep pattern matching, and LLM-powered context assessment—against any binary target. 
 
-## Overview
+Powered by a **File-Ledger Engine**, DeepZero was built to handle massive uncurated corpora (e.g., thousands of Windows kernel drivers) seamlessly through a robust file-based database, fast resume capabilities, and atomic synchronization barriers.
 
-Finding vulnerabilities in Windows kernel drivers usually means manually reverse engineering binaries in IDA or Ghidra. `DeepZero` automates this process using a multi-stage pipeline:
+## Key Features
 
-1. **Mass Triage:** Parses thousands of `.sys` files locally via `pefile` to identify Windows kernel drivers with user-reachable IOCTL surfaces, scoring them against heuristics from the [LOLDrivers](https://www.loldrivers.io/) database.
-2. **Decompilation:** Dispatches candidates to headless Ghidra to trace down `DriverEntry`, isolate the `IRP_MJ_DEVICE_CONTROL` dispatch handler, and extract clean C code for all IOCTL functions.
-3. **Pattern Matching:** Runs custom Semgrep rules against the decompiled C to find known vulnerability shapes (e.g., `MmMapIoSpace` with attacker-controlled physical addresses, missing `ProbeForRead`).
-4. **Agentic LLM Assessment:** Feeds the surviving candidates, decompiled dispatch handlers, and Semgrep findings into an LLM agent built on [DeepAgents](https://github.com/langchain-ai/deepagents) and Vertex AI (Gemini 2.5 Pro). The agent traces data flow, rejects false positives (e.g., hardware-gated paths), and generates a final `VULNERABLE` or `SAFE` report.
+- **Breadth-First Engine** — executes highly parallelized Map/Reduce/Batch primitives across large corpora in lockstep.
+- **Agentic File-Ledger (File-DB)** — zero dependencies; the entire pipeline state is cleanly serialized to `work/` with a global `run_manifest.json`, namespaced tool history, and LLM-ready `context.md` files.
+- **Fast, Idempotent Resume** — process a 12,000-file corpus, kill the pipeline, and instantly resume it with zero re-ingestion overhead. Completed states are skipped automatically.
+- **Pipeline-as-YAML** — hook up built-in tools or custom Python classes rapidly without modifying the core engine.
+- **Hardened for Scale** — atomic file writes with EDR/AV evasion retries, `ProcessGroupKills` for runaway GHIDRA JVMs, process isolation, and poison pill exception handling.
+- **Batch Processing** — massive performance boosts using `os.link` temp-copy patterns to scan 500 decompiled drivers instantly in a single Semgrep invocation.
+- **Any LLM Provider** — completely abstracted via LiteLLM.
 
-Everything before the LLM phase runs locally to save API costs. The pipeline deduplicates drivers by SHA256 hash to prevent redundant analysis.
-
-## Prerequisites
-
-- **Python 3.11+**
-- **Ghidra** (download and unzip anywhere on your system)
-- **Google Cloud Vertex AI** access (for the Gemini 2.5 Pro agent)
-
-## Installation
-
-DeepZero requires a standard Python environment and an external Ghidra installation to perform its reverse engineering subroutines.
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/416rehman/deepzero.git
-   cd deepzero
-   ```
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # or .venv\Scripts\activate on Windows
-   pip install -e .
-   ```
-
-## Configuration
-
-Copy `.env.example` to `.env` and fill in your paths and project details:
-
-```ini
-GOOGLE_CLOUD_PROJECT=your-gcp-project-id
-GOOGLE_CLOUD_LOCATION=us-central1
-GHIDRA_INSTALL_DIR=C:\path\to\ghidra_11.x_PUBLIC
-```
-
-## Usage
-
-You can point the agent at a single `.sys` file, a directory of drivers, or a massive driver pack:
+## Quick Start
 
 ```bash
-# Analyze a specific driver pack directory
-byovd "C:\Users\username\Downloads\Drivers"
+# install via pip
+pip install deepzero
 
-# Specific driver
-byovd "C:\path\to\target.sys"
+# run the loldrivers pipeline against your local directory
+deepzero run ./drivers/ --pipeline loldrivers --model vertex_ai/gemini-2.5-pro
+
+# check status of the run
+deepzero status -p loldrivers
+
+# resume after interruption (instantly skips everything already cached)
+deepzero resume -p loldrivers
 ```
 
-The pipeline will emit JSON logs to `work/` and write the final LLM assessment for flagged drivers to `VULNERABLE_report.md` or `SAFE_report.md` inside driver-specific subdirectories under `work/`.
+## Architecture: Polymorphic Tool Primitives
 
-## Performance & Caching
+DeepZero V2 enforces strict tool interfaces that allow for powerful pipeline semantics:
 
-Decompiling drivers is computationally expensive. Based on empirical runs:
-- **Triage Phase:** Extremely fast (validating PE headers and import tables for thousands of drivers takes only seconds/minutes).
-- **Ghidra Phase:** Takes roughly **1 to 3 minutes per driver** depending on complexity. 
-- **Scale:** Because analysis runs concurrently across a thread pool, throughput is high. Analyzing a massive driver pack with ~7,500 candidates takes roughly **8 to 10 hours** (overnight) on a standard machine.
+| Primitive | Operation | Description |
+|-----------|-----------|-------------|
+| **IngestTool** | 1:N | Discovery phase. Emits `Sample` instances (e.g., PE parsing & hash extraction). |
+| **MapTool** | 1:1 | Parallelized 1:1 worker (filters, decompilers, generic commands, LLM renderers). |
+| **BatchTool** | N:Batch | Evaluates all active samples via a single external invocation (e.g., Semgrep). |
+| **ReduceTool**| N:K | Synchronization barrier used for sorting or truncating the corpus (e.g., `top_k` ranking). |
 
-To mitigate this, `DeepZero` implements aggressive caching:
-1. **SHA256 Deduplication:** Identical drivers found in different locations or under different filenames are deduplicated by their SHA256 hash. The pipeline will never analyze the same binary twice.
-2. **Crash Resilience:** Triage results are cached locally. If the pipeline crashes or is interrupted, it will seamlessly resume from the exact candidate it was processing.
-3. **Report Skipping:** If a `VULNERABLE_report.md` or `SAFE_report.md` already exists for a hash, the pipeline skips it entirely to save Vertex AI API costs.
+## File Database Structure
 
-## Architecture
+No heavy databases needed. Everything is transparent to the user and accessible to LLM agents:
 
 ```
-┌──────────────────────────────────────────────────┐
-│                  byovd-agent                     │
-│                                                  │
-│  Triage ──▶ Ghidra ──▶ Semgrep ──▶ Gemini 2.5   │
-│  (.sys)     (headless)  (rules)    (Vertex AI)   │
-│                                        │         │
-│                                        ▼         │
-│                                  VULNERABLE /    │
-│                                  SAFE report     │
-└──────────────────────────────────────────────────┘
+work/<pipeline_name>/
+├── run_manifest.json          # Global fast-index of current active/skipped/failed samples
+└── samples/
+    └── <sample_id>/           # Safe, truncated SHA256 (e.g. 132fd1b8)
+        ├── state.json         # Strict namespaced execution ledger (history.<tool>.data)
+        ├── context.md         # Auto-generated sync barrier artifact for the LLM
+        └── decompiled/        # Work-in-progress artifacts cleanly isolated
 ```
 
-## Disclaimer
+## Built-in Tools
 
-This tool is for authorized security research and defensive purposes only. Do not use this to analyze or attack systems/software you do not own or have explicit permission to test.
+Available natively off-the-shelf and addressable by bare names in `pipeline.yaml`:
+- `file_discovery` - Fast local filesystem crawler.
+- `metadata_filter` - Declarative thresholding, checking, and deduping.
+- `hash_exclude` - Filter by list or file.
+- `generic_command` - Universal shell escape hatch.
+- `ghidra_decompile` - Headless GHIDRA integration with extraction script support.
+- `semgrep_scanner` - High-performance batched symlink/hardlink rule runner.
+- `top_k` - Sort active corpus by any nested `stage.metric` and truncate losers.
+- `generic_llm` - Jinja2-rendered structured context builder for LiteLLM.
+
+## CLI Commands
+
+```
+deepzero run <target>       — run a pipeline
+deepzero resume             — resume an interrupted/killed run
+deepzero status             — show run progress and sample outcomes
+deepzero interactive        — LLM-backed analysis REPL
+deepzero serve              — start REST API (requires deepzero[serve])
+deepzero validate <path>    — syntax validity check for pipelines
+deepzero list-tools         — list registered Python tools
+deepzero init <name>        — scaffold a new pipeline
+```
+
+## License
+
+MIT
