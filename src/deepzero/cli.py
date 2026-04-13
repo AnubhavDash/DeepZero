@@ -54,11 +54,41 @@ def _setup_logging(verbose: bool) -> None:
             logging.getLogger(lib).setLevel(logging.WARNING)
 
 
+def _build_runner(pipeline_def: Any) -> tuple[Any, Any]:
+    # shared setup for run/resume — builds PipelineRunner and optional LLM provider
+    from deepzero.engine.runner import PipelineRunner
+    from deepzero.engine.state import StateStore
+    from deepzero.providers.llm import LLMProvider
+
+    llm = LLMProvider(pipeline_def.model) if pipeline_def.model else None
+
+    global_config: dict[str, Any] = {
+        "settings": pipeline_def.settings,
+        "tools": pipeline_def.tools,
+        "knowledge": pipeline_def.knowledge,
+        "model": pipeline_def.model,
+    }
+
+    state_store = StateStore(pipeline_def.work_dir)
+
+    runner = PipelineRunner(
+        ingest=pipeline_def.ingest_tool,
+        stages=pipeline_def.stages,
+        state_store=state_store,
+        pipeline_dir=pipeline_def.pipeline_dir,
+        global_config=global_config,
+        llm=llm,
+        default_max_workers=pipeline_def.max_workers,
+    )
+
+    return runner, llm
+
 @click.group()
 @click.version_option(package_name="deepzero")
-def main():
+@click.pass_context
+def main(ctx: click.Context):
     """deepzero - configurable, data-driven binary analysis pipeline"""
-    pass
+    ctx.ensure_object(dict)
 
 
 @main.command()
@@ -75,9 +105,7 @@ def run(target: str, pipeline: str, model: str | None, work_dir: str | None, ver
     load_dotenv()
 
     from deepzero.engine.pipeline import load_pipeline
-    from deepzero.engine.runner import PipelineRunner
     from deepzero.engine.state import RunState, StateStore
-    from deepzero.providers.llm import LLMProvider
 
     # ensure built-in stages are registered
     import deepzero.stages  # noqa: F401
@@ -90,11 +118,9 @@ def run(target: str, pipeline: str, model: str | None, work_dir: str | None, ver
     console.print(f"  pipeline: {pipeline_def.name} ({len(pipeline_def.stage_specs)} stages)")
     console.print(f"  stages: {' -> '.join(pipeline_def.stage_names)}")
 
-    # setup llm provider if model is configured
-    llm = None
-    if pipeline_def.model:
+    runner, llm = _build_runner(pipeline_def)
+    if llm:
         console.print(f"  model: {pipeline_def.model}")
-        llm = LLMProvider(pipeline_def.model)
 
     # initialize state store
     state_store = StateStore(pipeline_def.work_dir)
@@ -109,26 +135,8 @@ def run(target: str, pipeline: str, model: str | None, work_dir: str | None, ver
         model=pipeline_def.model,
     )
 
-    # build global config for stages
-    global_config: dict[str, Any] = {
-        "settings": pipeline_def.settings,
-        "tools": pipeline_def.tools,
-        "knowledge": pipeline_def.knowledge,
-        "model": pipeline_def.model,
-    }
-
     console.print(f"  work_dir: {pipeline_def.work_dir}")
     console.print()
-
-    runner = PipelineRunner(
-        ingest=pipeline_def.ingest_tool,
-        stages=pipeline_def.stages,
-        state_store=state_store,
-        pipeline_dir=pipeline_def.pipeline_dir,
-        global_config=global_config,
-        llm=llm,
-        default_max_workers=pipeline_def.max_workers,
-    )
 
     run_state = runner.run(target_path, run_state)
 
@@ -156,9 +164,7 @@ def resume(pipeline: str, verbose: bool):
 
     import deepzero.stages  # noqa: F401
     from deepzero.engine.pipeline import load_pipeline
-    from deepzero.engine.runner import PipelineRunner
     from deepzero.engine.state import StateStore
-    from deepzero.providers.llm import LLMProvider
 
     pipeline_def = load_pipeline(pipeline)
     state_store = StateStore(pipeline_def.work_dir)
@@ -166,35 +172,15 @@ def resume(pipeline: str, verbose: bool):
 
     if run_state is None:
         console.print("[red]no run state found in work directory[/]")
-        return
+        raise SystemExit(1)
 
     console.print(f"[bold cyan]resuming[/] pipeline '{run_state.pipeline}' (run {run_state.run_id})")
     console.print(f"  status: {run_state.status}")
     _print_stats(run_state)
 
-    llm = None
-    if pipeline_def.model:
-        llm = LLMProvider(pipeline_def.model)
-
-    global_config: dict[str, Any] = {
-        "settings": pipeline_def.settings,
-        "tools": pipeline_def.tools,
-        "knowledge": pipeline_def.knowledge,
-        "model": pipeline_def.model,
-    }
+    runner, _ = _build_runner(pipeline_def)
 
     run_state.status = "running"
-
-    runner = PipelineRunner(
-        ingest=pipeline_def.ingest_tool,
-        stages=pipeline_def.stages,
-        state_store=state_store,
-        pipeline_dir=pipeline_def.pipeline_dir,
-        global_config=global_config,
-        llm=llm,
-        default_max_workers=pipeline_def.max_workers,
-    )
-
     run_state = runner.run(Path(run_state.target), run_state)
 
     console.print()
@@ -223,14 +209,14 @@ def status(pipeline: str | None, work_dir: str | None, verbose: bool):
         work_path = pipeline_def.work_dir
     else:
         console.print("[red]specify --pipeline or --work-dir[/]")
-        return
+        raise SystemExit(1)
 
     state_store = StateStore(work_path)
     run_state = state_store.load_run()
 
     if run_state is None:
         console.print("[yellow]no run found[/]")
-        return
+        raise SystemExit(1)
 
     color = {"completed": "green", "running": "cyan", "interrupted": "yellow", "failed": "red"}.get(
         run_state.status, "white"
@@ -407,7 +393,7 @@ def interactive(model: str, work_dir: str, verbose: bool):
 
 
 @main.command()
-@click.option("--host", default="0.0.0.0", help="bind host")
+@click.option("--host", default="127.0.0.1", help="bind host (use 0.0.0.0 for all interfaces)")
 @click.option("--port", default=8420, type=int, help="bind port")
 @click.option("--work-dir", "-w", default="work", help="work directory")
 def serve(host: str, port: int, work_dir: str):
@@ -421,7 +407,7 @@ def serve(host: str, port: int, work_dir: str):
         import uvicorn
     except ImportError:
         console.print("[red]uvicorn required: pip install deepzero[serve][/]")
-        return
+        raise SystemExit(1)
 
     app = create_app(Path(work_dir))
     uvicorn.run(app, host=host, port=port)

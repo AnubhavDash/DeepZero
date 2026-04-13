@@ -6,10 +6,8 @@
 import json
 import os
 import re
-import sys
 
 from ghidra.app.decompiler import DecompInterface, DecompileOptions
-from ghidra.program.model.symbol import SourceType
 
 
 def get_decompiler():
@@ -42,15 +40,7 @@ def find_driver_entry():
         if funcs:
             return funcs[0]
 
-    # fallback: entry point
-    entry_addr = currentProgram.getImageBase().add(
-        currentProgram.getImageBase().getOffset()
-    )
-    func = fm.getFunctionAt(currentProgram.getSymbolTable().getPrimarySymbol(
-        currentProgram.getImageBase()
-    ).getAddress()) if False else None
-
-    # try the actual entry point
+    # fallback: entry point via symbol table
     entry_point = currentProgram.getSymbolTable().getExternalEntryPointIterator()
     for addr in entry_point:
         f = fm.getFunctionAt(addr)
@@ -135,9 +125,9 @@ def find_dispatch_assignment(decomp, driver_entry=None):
                 try:
                     for sub in called.getCalledFunctions(getMonitor()):
                         priority_funcs.append(sub)
-                except Exception:
-                    pass
-        except Exception:
+                except Exception:  # noqa: B110 — ghidra may fail to resolve callees in obfuscated code
+                    continue
+        except Exception:  # noqa: B110 — failed to enumerate callees from driver entry
             pass
 
     seen_addrs = set()
@@ -237,7 +227,6 @@ def main():
         f.write(entry_c)
 
     # extract device name and symbolic link from strings
-    listing = currentProgram.getListing()
     for s in currentProgram.getListing().getDefinedData(True):
         try:
             val = s.getValue()
@@ -247,8 +236,8 @@ def main():
                     result["device_name"] = sv.strip('"').strip("u'")
                 elif "\\DosDevices\\" in sv:
                     result["symbolic_link"] = sv.strip('"').strip("u'")
-        except Exception:
-            pass
+        except Exception:  # noqa: B110 — some data entries cannot be read as values
+            continue
 
     # find dispatch handler
     dispatch_func = find_dispatch_assignment(decomp, driver_entry)
@@ -294,7 +283,7 @@ def main():
                     if c:
                         subfuncs_c.append(c)
                         get_subfuncs(called, depth + 1)
-        except Exception:
+        except Exception:  # noqa: B110 — ghidra may fail to decompile or resolve calls
             pass
 
     get_subfuncs(dispatch_func)
@@ -350,7 +339,7 @@ def write_result(output_dir, result):
 
 try:
     main()
-except Exception as e:
+except Exception:
     import traceback
     output_dir = os.environ.get("DEEPZERO_OUTPUT_DIR", ".")
     res = {

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 class TestContextGeneration:
     def test_generates_context_md(self, tmp_path):
         from deepzero.engine.context import generate_context

@@ -32,6 +32,12 @@ dist/
 build/
 *.egg-info/
 
+# Desloppify
+.desloppify/
+
+# Claude
+.claude/
+
 # Tests & Coverage
 .pytest_cache/
 .coverage

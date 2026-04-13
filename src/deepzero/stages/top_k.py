@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from deepzero.engine.stage import ReduceTool, StageSpec
+from deepzero.engine.stage import ReduceTool
 from deepzero.engine.state import SampleState
 
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -21,13 +20,12 @@ from deepzero.engine.stage import (
     IngestTool,
     MapTool,
     ReduceTool,
-    Sample,
     StageContext,
     StageResult,
     StageSpec,
     Tool,
 )
-from deepzero.engine.state import RunState, SampleState, StageOutput, StateStore
+from deepzero.engine.state import RunState, SampleState, StateStore
 
 log = logging.getLogger("deepzero.runner")
 
@@ -66,12 +64,13 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
             )
         else:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except Exception:
-        pass
+    except (OSError, ProcessLookupError):
+        # process already exited or pid is invalid
+        log.debug("process tree kill skipped — pid %d already gone", proc.pid)
     try:
         proc.wait(timeout=5)
-    except Exception:
-        pass
+    except subprocess.TimeoutExpired:
+        log.debug("process %d did not exit within 5s after kill", proc.pid)
 
 
 class PipelineRunner:
@@ -515,8 +514,8 @@ class PipelineRunner:
                 sample_dir = self.state_store.sample_dir(sid)
                 try:
                     generate_context(sample_dir, state)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.debug("context generation failed for %s: %s", sid, exc)
 
     def _teardown_tools(self) -> None:
         for _, tool in self.stages:

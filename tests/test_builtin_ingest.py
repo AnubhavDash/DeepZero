@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
 
 from deepzero.engine.stage import StageSpec
 from deepzero.stages.ingest import FileDiscovery

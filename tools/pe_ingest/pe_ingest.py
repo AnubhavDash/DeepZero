@@ -110,7 +110,7 @@ class PEIngest(IngestTool):
             return {"error": f"cannot read: {e}"}
 
         sha256 = hashlib.sha256(data).hexdigest()
-        md5 = hashlib.md5(data).hexdigest()
+        md5 = hashlib.md5(data, usedforsecurity=False).hexdigest()  # noqa: S324
         meta: dict[str, Any] = {"sha256": sha256, "md5": md5, "size_bytes": len(data)}
 
         subsystem_filter = config.get("subsystem_filter", [])
@@ -153,8 +153,8 @@ class PEIngest(IngestTool):
                 pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"],
                 pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_SECURITY"],
             ])
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: B110 — pe parsing can fail in many ways on malformed files
+            self.log.debug("pe data directory parse error: %s", exc)
 
         imported_functions = []
         imported_dlls = []
@@ -219,8 +219,8 @@ class PEIngest(IngestTool):
             try:
                 if pe.OPTIONAL_HEADER.MajorOperatingSystemVersion >= 10:
                     score += 3.0
-            except Exception:
-                pass
+            except (AttributeError, IndexError):
+                self.log.debug("could not read os version from PE header")
 
         meta["priority_score"] = min(10.0, score)
 

@@ -75,6 +75,7 @@ class GenericLLM(MapTool):
             env = jinja2.Environment(
                 loader=jinja2.FileSystemLoader(str(template_path.parent)),
                 undefined=jinja2.Undefined,
+                autoescape=jinja2.select_autoescape(default=False, default_for_string=False),
             )
             template = env.from_string(raw)
             return template.render(**template_vars)

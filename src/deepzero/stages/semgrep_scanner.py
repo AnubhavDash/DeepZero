@@ -186,5 +186,6 @@ class SemgrepScannerTool(BatchTool):
     def _cleanup_batch_dir(self, batch_dir: Path) -> None:
         try:
             shutil.rmtree(batch_dir, ignore_errors=True)
-        except Exception:
-            pass
+        except OSError:
+            # rmtree with ignore_errors already handles most failures
+            self.log.debug("batch dir cleanup failed: %s", batch_dir)

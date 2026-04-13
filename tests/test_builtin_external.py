@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from deepzero.engine.stage import StageContext, StageSpec
 from deepzero.engine.state import StageOutput
 from deepzero.stages.command import GenericCommand
