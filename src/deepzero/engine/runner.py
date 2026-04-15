@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import os
 import signal
+import tempfile
 import threading
 import time
 import traceback as tb_module
@@ -67,7 +69,7 @@ class PipelineRunner:
             run_state.status = "interrupted"
             self.state_store.save_run(run_state)
             return run_state
-        except Exception as e:
+        except (RuntimeError, ValueError, TypeError, OSError, AttributeError, LookupError, AssertionError) as e:
             log.error("pipeline failed: %s", e)
             run_state.mark_failed(str(e))
             self.state_store.save_run(run_state)
@@ -100,7 +102,7 @@ class PipelineRunner:
             run_state.stages = stage_names
             self.state_store.save_run(run_state)
         else:
-            # fresh run — execute ingest
+            # fresh run - execute ingest
             log.info("--- %s (ingest) ---", self.ingest.spec.name)
             samples = self.ingest.discover(target, self.ingest.spec.config, self.global_config)
 
@@ -158,7 +160,7 @@ class PipelineRunner:
             else:
                 self._run_map(tool, active, spec, stage_stats)
 
-            # dumb limit — pure truncation, no sorting
+            # dumb limit - pure truncation, no sorting
             limit = spec.config.get("limit", 0)
             if limit > 0:
                 still_active = [s for s in sample_states.values() if s.is_active()]
@@ -232,9 +234,8 @@ class PipelineRunner:
                         break
                     done_count += 1
                     state = future_map[future]
-                    try:
-                        future.result()
-                    except Exception as exc:
+                    exc = future.exception()
+                    if exc:
                         log.error("  %s unhandled error: %s", state.filename, exc)
                         state.mark_stage_failed(spec.name, f"{type(exc).__name__}: {exc}")
                         self.state_store.save_sample(state)
@@ -290,7 +291,7 @@ class PipelineRunner:
                         artifacts=result.artifacts,
                         data=result.data,
                     )
-                    # immediate save — don't wait for barrier (resume granularity)
+                    # immediate save - don't wait for barrier (resume granularity)
                     self.state_store.save_sample(state)
                     return
 
@@ -310,12 +311,22 @@ class PipelineRunner:
                     self._shutdown_event.set()
                 return
 
-            except Exception as exc:
+            except (RuntimeError, ValueError, TypeError, OSError, AttributeError, LookupError, AssertionError) as exc:
                 error_msg = f"{type(exc).__name__}: {exc}"
 
                 # capture traceback out of band
                 err_log = sample_dir / f"{spec.name}_error.log"
-                err_log.write_text(tb_module.format_exc(), encoding="utf-8")
+                fd, tmp = tempfile.mkstemp(dir=str(sample_dir), suffix=".log")
+                try:
+                    os.write(fd, tb_module.format_exc().encode("utf-8"))
+                    os.close(fd)
+                    os.replace(tmp, str(err_log))
+                except OSError:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        log.debug("fd already closed for %s", state.filename)
+                    log.debug("failed to write error log for %s", state.filename)
 
                 if attempts < max_attempts:
                     backoff = min(2 ** attempts, 30)
@@ -347,9 +358,9 @@ class PipelineRunner:
 
         try:
             results = tool.reduce(active, spec.config)
-        except Exception as exc:
+        except (RuntimeError, ValueError, TypeError, OSError, AttributeError, LookupError, AssertionError) as exc:
             log.error("  reduce tool '%s' crashed: %s", spec.name, exc)
-            # don't kill the pipeline — just log and continue with samples unchanged
+            # don't kill the pipeline - just log and continue with samples unchanged
             return
 
         for state in results:
@@ -395,7 +406,7 @@ class PipelineRunner:
 
         try:
             results = tool.execute_batch(entries, spec.config)
-        except Exception as exc:
+        except (RuntimeError, ValueError, TypeError, OSError, AttributeError, LookupError, AssertionError) as exc:
             log.error("  batch tool '%s' crashed: %s", spec.name, exc)
             for state in pending:
                 state.mark_stage_failed(spec.name, f"batch tool crashed: {exc}")
@@ -439,29 +450,12 @@ class PipelineRunner:
         if timeout <= 0:
             return tool.process(ctx)
 
-        result_holder: list[StageResult] = []
-        error_holder: list[Exception] = []
-
-        def _run():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(tool.process, ctx)
             try:
-                result_holder.append(tool.process(ctx))
-            except Exception as e:
-                error_holder.append(e)
-
-        thread = threading.Thread(target=_run, daemon=True)
-        thread.start()
-        thread.join(timeout=timeout)
-
-        if thread.is_alive():
-            raise TimeoutError(f"tool timed out after {timeout}s")
-
-        if error_holder:
-            raise error_holder[0]
-
-        if not result_holder:
-            raise RuntimeError("tool completed without producing a result")
-
-        return result_holder[0]
+                return future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                raise TimeoutError(f"tool timed out after {timeout}s")
 
     def _generate_context_files(self, sample_states: dict[str, SampleState]) -> None:
         for sid, state in sample_states.items():
@@ -469,33 +463,41 @@ class PipelineRunner:
                 sample_dir = self.state_store.sample_dir(sid)
                 try:
                     generate_context(sample_dir, state)
-                except Exception as exc:
-                    log.debug("context generation failed for %s: %s", sid, exc)
+                except (ValueError, TypeError, OSError, RuntimeError, AttributeError) as exc:
+                    log.warning(
+                        "context generation failed for %s: %s — %s",
+                        sid, type(exc).__name__, exc,
+                    )
 
     def _teardown_tools(self) -> None:
+        errors: list[str] = []
         for _, tool in self.stages:
             try:
                 tool.teardown()
-            except Exception as e:
+            except (RuntimeError, ValueError, OSError, AttributeError) as e:
+                errors.append(f"{tool.spec.name}: {e}")
                 log.warning("tool '%s' teardown error: %s", tool.spec.name, e)
         try:
             self.ingest.teardown()
-        except Exception as e:
+        except (RuntimeError, ValueError, OSError, AttributeError) as e:
+            errors.append(f"ingest: {e}")
             log.warning("ingest tool teardown error: %s", e)
+        if errors:
+            log.warning("%d tool(s) failed teardown", len(errors))
 
     def _install_signal_handler(self) -> None:
         try:
             self._original_sigint = signal.getsignal(signal.SIGINT)
             signal.signal(signal.SIGINT, self._handle_signal)
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            log.debug("cannot install signal handler: %s", exc)
 
     def _restore_signal_handler(self) -> None:
         if self._original_sigint is not None:
             try:
                 signal.signal(signal.SIGINT, self._original_sigint)
-            except (OSError, ValueError):
-                pass
+            except (OSError, ValueError) as exc:
+                log.debug("cannot restore signal handler: %s", exc)
 
     def _handle_signal(self, signum, frame) -> None:
         if self._shutdown_event.is_set():
