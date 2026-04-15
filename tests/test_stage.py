@@ -172,7 +172,8 @@ class TestDataClasses:
     def test_stage_spec_defaults(self):
         from deepzero.engine.stage import StageSpec, FailurePolicy
         s = StageSpec(name="test", tool="metadata_filter")
-        assert s.parallel == 4
+        assert s.config == {}
+        assert s.parallel == 0
         assert s.on_failure == FailurePolicy.SKIP
         assert s.timeout == 0
 

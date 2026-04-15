@@ -211,40 +211,55 @@ class PipelineRunner:
         if not pending:
             return
 
-        if spec.parallel <= 1:
-            for idx, state in enumerate(pending):
-                if self._shutdown_event.is_set():
-                    break
-                self._process_one_map(state, spec, tool)
-                outcome = self._classify_outcome(state, spec.name)
-                stage_stats[outcome] += 1
-                if (idx + 1) % max(1, len(pending) // 5) == 0 or (idx + 1) == len(pending):
-                    log.info("  %d/%d processed", idx + 1, len(pending))
-        else:
-            max_workers = min(spec.parallel, len(pending))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_map = {
-                    executor.submit(self._process_one_map, s, spec, tool): s
-                    for s in pending
-                }
-                done_count = 0
-                for future in concurrent.futures.as_completed(future_map):
-                    if self._shutdown_event.is_set():
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        break
-                    done_count += 1
-                    state = future_map[future]
-                    exc = future.exception()
-                    if exc:
-                        log.error("  %s unhandled error: %s", state.filename, exc)
-                        state.mark_stage_failed(spec.name, f"{type(exc).__name__}: {exc}")
-                        self.state_store.save_sample(state)
+        parallelism = spec.parallel
+        if parallelism <= 0:
+            import os
+            parallelism = os.cpu_count() or 4
+            log.info("  %s auto-scaled to %d workers", spec.name, parallelism)
 
+        from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
+        import deepzero.cli
+        
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeRemainingColumn(),
+            console=deepzero.cli.console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task(f"[cyan]running {spec.name}[/]", total=len(pending))
+
+            if parallelism <= 1:
+                for idx, state in enumerate(pending):
+                    if self._shutdown_event.is_set():
+                        break
+                    self._process_one_map(state, spec, tool)
                     outcome = self._classify_outcome(state, spec.name)
                     stage_stats[outcome] += 1
+                    progress.advance(task)
+            else:
+                max_workers = min(parallelism, len(pending))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_map = {
+                        executor.submit(self._process_one_map, s, spec, tool): s
+                        for s in pending
+                    }
+                    for future in concurrent.futures.as_completed(future_map):
+                        if self._shutdown_event.is_set():
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            break
+                        state = future_map[future]
+                        exc = future.exception()
+                        if exc:
+                            log.error("  %s unhandled error: %s", state.filename, exc)
+                            state.mark_stage_failed(spec.name, f"{type(exc).__name__}: {exc}")
+                            self.state_store.save_sample(state)
 
-                    if done_count % max(1, len(pending) // 5) == 0 or done_count == len(pending):
-                        log.info("  %d/%d processed", done_count, len(pending))
+                        outcome = self._classify_outcome(state, spec.name)
+                        stage_stats[outcome] += 1
+                        progress.advance(task)
 
     def _process_one_map(
         self,

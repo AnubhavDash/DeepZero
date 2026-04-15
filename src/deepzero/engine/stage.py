@@ -107,8 +107,8 @@ class StageSpec:
     tool: str
     # stage config from yaml
     config: dict[str, Any] = field(default_factory=dict)
-    # concurrency: how many samples to process in parallel for this stage
-    parallel: int = 4
+    # concurrency: how many samples to process in parallel for this stage (0 = max hardware)
+    parallel: int = 0
     # what to do when a sample fails this stage
     on_failure: FailurePolicy = FailurePolicy.SKIP
     # max retries on failure (only used when on_failure=retry)

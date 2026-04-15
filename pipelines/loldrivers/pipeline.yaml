@@ -61,7 +61,7 @@ stages:
   # decompile with ghidra
   - name: decompile
     tool: ghidra_decompile/ghidra_decompile.py
-    parallel: 1
+    parallel: 0
     timeout: 600
     config:
       strategy: extract_dispatch.py
