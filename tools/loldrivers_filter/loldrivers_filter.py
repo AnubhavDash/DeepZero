@@ -4,7 +4,6 @@ import http.client
 import json
 import os
 import time
-import urllib.parse
 from pathlib import Path
 from typing import Any
 

@@ -2,6 +2,7 @@
 # @category BYOVD
 # @description extract IRP dispatch table and decompile IOCTL handlers
 # runs inside ghidra's jython environment via analyzeHeadless -postScript
+# ruff: noqa: F821
 
 import json
 import os
