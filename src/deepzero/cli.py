@@ -112,8 +112,9 @@ def main(ctx: click.Context):
 @click.option("--model", "-m", default=None, help="llm model override (e.g. openai/gpt-4o)")
 @click.option("--work-dir", "-w", default=None, help="work directory override")
 @click.option("--verbose", "-v", is_flag=True, help="verbose logging")
-def run(target: str, pipeline: str, model: str | None, work_dir: str | None, verbose: bool):
-    """run a pipeline against a target file or directory"""
+@click.option("--clean", is_flag=True, help="permanently delete previous run data and start fresh")
+def run(target: str, pipeline: str, model: str | None, work_dir: str | None, verbose: bool, clean: bool):
+    """run a pipeline against a target file or directory (resumes automatically)"""
     _setup_logging(verbose)
 
     _load_env()
@@ -131,12 +132,44 @@ def run(target: str, pipeline: str, model: str | None, work_dir: str | None, ver
         console.print(f"[bold red]X ERROR[/]: {e}")
         raise SystemExit(1)
 
+    import os
+    import shutil
+    import time
+    import threading
+    
+    if clean and pipeline_def.work_dir.exists():
+        console.print("[yellow]⚠ purging previous run data...[/]")
+        trash_dir = pipeline_def.work_dir.with_name(f"trash_{pipeline_def.work_dir.name}_{int(time.time())}")
+        try:
+            os.rename(pipeline_def.work_dir, trash_dir)
+        except OSError as e:
+            console.print("rename failed: {}".format(e))
+            console.print("purging by rmtree...")
+            shutil.rmtree(pipeline_def.work_dir, ignore_errors=True)
+
+    # launch asynchronous garbage collection for all orphaned trash directories
+    def _purge_trash() -> None:
+        if not pipeline_def.work_dir.parent.exists():
+            return
+        for child in pipeline_def.work_dir.parent.iterdir():
+            if child.is_dir() and child.name.startswith("trash_"):
+                shutil.rmtree(child, ignore_errors=True)
+
+    threading.Thread(target=_purge_trash, daemon=True).start()
 
     from deepzero.engine.ui import PipelineDashboard
+    from deepzero.engine.types import RunStatus
+
+    state_store = StateStore(pipeline_def.work_dir)
+    existing_run = state_store.load_run()
+
+    is_resume = existing_run is not None
 
     dashboard = PipelineDashboard(pipeline_def.stage_names, console=console)
+    header_name = f"{pipeline_def.name} (resuming run {existing_run.run_id})" if is_resume else pipeline_def.name
+    
     dashboard.print_header(
-        name=pipeline_def.name,
+        name=header_name,
         target=str(target_path),
         model=pipeline_def.model,
         work_dir=str(pipeline_def.work_dir),
@@ -144,77 +177,21 @@ def run(target: str, pipeline: str, model: str | None, work_dir: str | None, ver
 
     runner, llm = _build_runner(pipeline_def, dashboard=dashboard)
 
-    # initialize state store
-    state_store = StateStore(pipeline_def.work_dir)
-    state_store.save_pipeline_snapshot(pipeline_def.raw_yaml)
-
-    # create run state
-    run_id = f"run_{time.strftime('%Y%m%d_%H%M%S')}"
-    run_state = RunState(
-        run_id=run_id,
-        pipeline=pipeline_def.name,
-        target=str(target_path),
-        model=pipeline_def.model,
-    )
+    if is_resume:
+        run_state = existing_run
+        run_state.status = RunStatus.RUNNING
+    else:
+        # initialize fresh state
+        state_store.save_pipeline_snapshot(pipeline_def.raw_yaml)
+        run_id = f"run_{time.strftime('%Y%m%d_%H%M%S')}"
+        run_state = RunState(
+            run_id=run_id,
+            pipeline=pipeline_def.name,
+            target=str(target_path),
+            model=pipeline_def.model,
+        )
 
     run_state = runner.run(target_path, run_state)
-
-
-
-
-@main.command()
-@click.option(
-    "--pipeline",
-    "-p",
-    required=True,
-    help="pipeline name or path (for processor resolution)",
-)
-@click.option("--model", "-m", default=None, help="llm model override (e.g. openai/gpt-4o)")
-@click.option("--verbose", "-v", is_flag=True, help="verbose logging")
-def resume(pipeline: str, model: str | None, verbose: bool):
-    """resume an interrupted pipeline run"""
-    _setup_logging(verbose)
-
-    _load_env()
-
-    import deepzero.stages  # noqa: F401
-    from deepzero.engine.pipeline import load_pipeline
-    from deepzero.engine.state import StateStore
-
-    try:
-        pipeline_def = load_pipeline(pipeline)
-    except ValueError as e:
-        console.print(f"[bold red]X ERROR[/]: {e}")
-        raise SystemExit(1)
-
-    # allow model override on resume
-    if model:
-        pipeline_def.model = model
-
-    state_store = StateStore(pipeline_def.work_dir)
-    run_state = state_store.load_run()
-
-    if run_state is None:
-        console.print("[red]no run state found in work directory[/]")
-        raise SystemExit(1)
-
-    from deepzero.engine.ui import PipelineDashboard
-
-    dashboard = PipelineDashboard(pipeline_def.stage_names, console=console)
-    dashboard.print_header(
-        name=f"{pipeline_def.name} (resuming run {run_state.run_id})",
-        target=run_state.target,
-        model=pipeline_def.model,
-        work_dir=str(pipeline_def.work_dir),
-    )
-
-    runner, _ = _build_runner(pipeline_def, dashboard=dashboard)
-
-    run_state.status = RunStatus.RUNNING
-    run_state = runner.run(Path(run_state.target), run_state)
-
-
-
 @main.command()
 @click.option("--pipeline", "-p", default=None, help="pipeline name")
 @click.option("--work-dir", "-w", default=None, help="work directory")

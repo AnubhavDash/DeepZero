@@ -18,7 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 llm = ["litellm>=1.0"]
 serve = ["starlette>=0.27", "uvicorn>=0.22"]
-pe = ["pefile>=2023.2"]
+pe = ["lief>=0.14.0"]
 full = ["deepzero[llm,serve,pe]"]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21.0", "deepzero[full]"]
 

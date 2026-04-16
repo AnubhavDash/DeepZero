@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
+import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -73,8 +74,6 @@ class GhidraDecompile(MapProcessor):
         script_path = self._resolve_script(self.config.strategy)
         output_dir = entry.sample_dir / "decompiled"
 
-        java_home = self.config.java_home
-
         extra_env: dict[str, str] = {}
         if self.config.max_functions is not None:
             extra_env["DEEPZERO_MAX_FUNCTIONS"] = str(self.config.max_functions)
@@ -88,7 +87,7 @@ class GhidraDecompile(MapProcessor):
             ghidra_install_dir=ghidra_dir,
             post_script=script_path,
             timeout=active_timeout,
-            java_home=java_home,
+            java_home=self.config.java_home,
             extra_env=extra_env if extra_env else None,
         )
 
@@ -119,8 +118,6 @@ class GhidraDecompile(MapProcessor):
         raise FileNotFoundError(
             f"strategy '{strategy}' not found in {self.processor_dir / 'scripts'}"
         )
-
-    # -- ghidra subprocess management (inlined from former providers/decompiler.py) --
 
     def _build_ghidra_cmd(
         self,
@@ -190,56 +187,47 @@ class GhidraDecompile(MapProcessor):
 
         log.info("starting ghidra analysis of %s (timeout=%ds)", binary_path.name, timeout)
 
+        start_time = time.monotonic()
+
         try:
-            return asyncio.run(
-                self._run_async(cmd, output_dir, timeout, env, stdout_log, stderr_log)
-            )
-        except (OSError, RuntimeError) as e:
+            with open(stdout_log, "wb") as fout, open(stderr_log, "wb") as ferr:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=fout,
+                    stderr=ferr,
+                    stdin=subprocess.DEVNULL,
+                    env=env,
+                )
+
+                try:
+                    proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=10)
+                    elapsed = time.monotonic() - start_time
+                    log.warning("ghidra timed out for %s after %.1fs", binary_path.name, elapsed)
+                    return {"success": False, "error": f"ghidra timed out after {timeout}s"}
+
+        except OSError as e:
             return {"success": False, "error": f"execution error: {e}"}
 
-    async def _run_async(
-        self,
-        cmd: list[str],
-        output_dir: Path,
-        timeout: int,
-        env: dict[str, str],
-        stdout_log: Path,
-        stderr_log: Path,
-    ) -> dict[str, Any]:
-        with open(stdout_log, "wb") as fout, open(stderr_log, "wb") as ferr:
-            proc = await asyncio.create_subprocess_exec(
-                cmd[0],
-                *cmd[1:],
-                stdout=fout,
-                stderr=ferr,
-                stdin=asyncio.subprocess.DEVNULL,
-                env=env,
-            )
-
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=timeout)
-            except asyncio.TimeoutError:
-                if proc.returncode is None:
-                    proc.kill()
-                    try:
-                        await asyncio.wait_for(proc.wait(), timeout=10)
-                    except asyncio.TimeoutError as kill_exc:
-                        raise RuntimeError(
-                            "ghidra process failed to terminate after kill limit"
-                        ) from kill_exc
-                return {"success": False, "error": f"ghidra timed out after {timeout}s"}
+        elapsed = time.monotonic() - start_time
 
         if proc.returncode != 0:
             stderr_text = ""
             if stderr_log.exists():
                 stderr_text = stderr_log.read_text(encoding="utf-8", errors="replace")[-500:]
+            log.warning("ghidra failed for %s (code %d, %.1fs)", binary_path.name, proc.returncode, elapsed)
             return {
                 "success": False,
                 "error": f"ghidra exited with code {proc.returncode}: {stderr_text}",
             }
-        cached_result = output_dir / "ghidra_result.json"
+
         if not cached_result.exists():
+            log.warning("ghidra produced no result for %s (%.1fs)", binary_path.name, elapsed)
             return {"success": False, "error": "ghidra succeeded but no result found"}
+
+        log.info("ghidra completed %s (%.1fs)", binary_path.name, elapsed)
 
         try:
             return json.loads(cached_result.read_text(encoding="utf-8"))
