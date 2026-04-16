@@ -40,7 +40,7 @@ def kill_process_tree(proc: subprocess.Popen) -> None:
     try:
         if sys.platform == "win32":
             subprocess.run(
-                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                [r"C:\Windows\System32\taskkill.exe", "/T", "/F", "/PID", str(proc.pid)],
                 capture_output=True,
                 timeout=10,
             )

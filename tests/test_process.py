@@ -85,7 +85,7 @@ class TestKillProcessTree:
 
         mock_run.assert_called_once()
         call_args = mock_run.call_args[0][0]
-        assert "taskkill" in call_args
+        assert r"C:\Windows\System32\taskkill.exe" in call_args
         assert str(12345) in call_args
 
     @patch("deepzero.engine.process.subprocess.run", side_effect=OSError("no such process"))

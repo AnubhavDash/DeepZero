@@ -34,7 +34,7 @@ jobs:
         
     - name: Security scan with Bandit
       run: |
-        bandit -c pyproject.toml -r .
+        bandit -ll -ii -c pyproject.toml -r .
         
     - name: Test with pytest
       run: |

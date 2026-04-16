@@ -47,8 +47,8 @@ class GhidraDecompile(MapProcessor):
                 with open(cached, "r", encoding="utf-8") as f:
                     json.load(f)
                 return "decompilation already cached"
-            except Exception:
-                pass
+            except Exception as e:
+                self.log.debug("failed to read cached ghidra output: %s", e)
         return None
 
     def process(self, ctx: ProcessorContext, entry: ProcessorEntry) -> ProcessorResult:

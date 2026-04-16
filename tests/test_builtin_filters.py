@@ -7,7 +7,7 @@ from pathlib import Path
 class TestMetadataFilter:
     def _make_ctx(self, data: dict, config: dict, tmp_path=None):
         if tmp_path is None:
-            tmp_path = Path("/tmp")  # nosec B108
+            tmp_path = Path(__import__("tempfile").gettempdir())
         from deepzero.engine.stage import ProcessorContext
         from deepzero.engine.state import StageOutput
         history = {"discover": StageOutput(status="completed", data=data)}
@@ -101,7 +101,7 @@ class TestMetadataFilter:
 class TestHashExclude:
     def _make_ctx(self, data: dict, config: dict, tmp_path=None):
         if tmp_path is None:
-            tmp_path = Path("/tmp")  # nosec B108
+            tmp_path = Path(__import__("tempfile").gettempdir())
         from deepzero.engine.stage import ProcessorContext
         from deepzero.engine.state import StageOutput
         history = {"discover": StageOutput(status="completed", data=data)}
@@ -177,15 +177,16 @@ class TestTopKSelector:
         spec = StageSpec(name="pick", processor="top_k", config={"metric_path": "scan.finding_count", "keep_top": 2, "sort_order": "desc"})
         processor = TopKSelector(spec)
 
-        ctx = ProcessorContext(pipeline_dir=Path("/tmp"), global_config={}, llm=None)  # nosec B108
+        import tempfile
+        ctx = ProcessorContext(pipeline_dir=Path(tempfile.gettempdir()), global_config={}, llm=None)
 
         entries = []
         for i in range(5):
             entry = ProcessorEntry(
                 sample_id=f"s{i}",
-                source_path=Path(f"/tmp/s{i}.sys"),  # nosec B108
+                source_path=Path(tempfile.gettempdir()) / f"s{i}.sys",
                 filename=f"s{i}.sys",
-                sample_dir=Path(f"/tmp/s{i}"),  # nosec B108
+                sample_dir=Path(tempfile.gettempdir()) / f"s{i}",
                 _store=None
             )
             entry._history = {"scan": StageOutput(status="completed", data={"finding_count": i})}
@@ -204,13 +205,14 @@ class TestTopKSelector:
 
         spec = StageSpec(name="pick", processor="top_k", config={})
         processor = TopKSelector(spec)
-        ctx = ProcessorContext(pipeline_dir=Path("/tmp"), global_config={}, llm=None)  # nosec B108
+        import tempfile
+        ctx = ProcessorContext(pipeline_dir=Path(tempfile.gettempdir()), global_config={}, llm=None)
         
         entry = ProcessorEntry(
             sample_id="s0",
-            source_path=Path("/tmp/s0.sys"),  # nosec B108
+            source_path=Path(tempfile.gettempdir()) / "s0.sys",
             filename="s0.sys",
-            sample_dir=Path("/tmp/s0"),  # nosec B108
+            sample_dir=Path(tempfile.gettempdir()) / "s0",
             _store=None
         )
 
