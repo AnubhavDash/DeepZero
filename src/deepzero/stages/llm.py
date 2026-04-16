@@ -110,7 +110,7 @@ class GenericLLM(MapProcessor):
     def _render_prompt(
         self, prompt_ref: str, ctx: ProcessorContext, entry: ProcessorEntry
     ) -> str:
-        template_path = self._resolve_template(prompt_ref)
+        template_path = self._resolve_template(prompt_ref, ctx)
 
         if template_path is not None:
             raw = template_path.read_text(encoding="utf-8")
@@ -172,11 +172,15 @@ class GenericLLM(MapProcessor):
 
         return template_vars
 
-    def _resolve_template(self, ref: str) -> Path | None:
+    def _resolve_template(self, ref: str, ctx: ProcessorContext | None = None) -> Path | None:
         if "/" in ref or "\\" in ref:
             resolved = (Path.cwd() / ref).resolve()
             if resolved.exists():
                 return resolved
+            if ctx is not None:
+                resolved = (ctx.pipeline_dir / ref).resolve()
+                if resolved.exists():
+                    return resolved
             return None
 
         abs_path = Path(ref)

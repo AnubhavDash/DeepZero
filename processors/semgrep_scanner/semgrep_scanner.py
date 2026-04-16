@@ -13,6 +13,7 @@ from deepzero.engine.stage import (
     BulkMapProcessor,
     ProcessorResult,
     ProcessorContext,
+    ProcessorEntry,
 )
 
 
@@ -41,7 +42,7 @@ class SemgrepScanner(BulkMapProcessor):
         return errors
 
     def process(
-        self, ctx: ProcessorContext, entries: list[Sample]
+        self, ctx: ProcessorContext, entries: list[ProcessorEntry]
     ) -> list[ProcessorResult]:
         rules_dir = self.config.get("rules_dir", "")
         rules_path = (ctx.pipeline_dir / rules_dir).resolve()
@@ -51,7 +52,7 @@ class SemgrepScanner(BulkMapProcessor):
         min_findings = self.config.get("min_findings", 0)
 
         results: list[ProcessorResult | None] = [None] * len(entries)
-        uncached_entries: list[tuple[int, Sample]] = []
+        uncached_entries: list[tuple[int, ProcessorEntry]] = []
 
         for i, entry in enumerate(entries):
             findings_path = entry.sample_dir / "findings.json"
@@ -105,7 +106,7 @@ class SemgrepScanner(BulkMapProcessor):
 
     def _build_bulk_dir(
         self,
-        uncached_entries: list[tuple[int, Sample]],
+        uncached_entries: list[tuple[int, ProcessorEntry]],
         bulk_dir: Path,
         target_subdir: str,
     ) -> dict[str, int]:
@@ -135,7 +136,7 @@ class SemgrepScanner(BulkMapProcessor):
         rules_path: Path,
         bulk_dir: Path,
         timeout: int,
-        uncached_entries: list[tuple[int, Sample]],
+        uncached_entries: list[tuple[int, ProcessorEntry]],
         file_to_sample: dict[str, int],
         results: list[ProcessorResult | None],
         min_findings: int,
@@ -207,7 +208,7 @@ class SemgrepScanner(BulkMapProcessor):
         self,
         output: dict[str, Any],
         file_to_sample: dict[str, int],
-        uncached_entries: list[tuple[int, Sample]],
+        uncached_entries: list[tuple[int, ProcessorEntry]],
         results: list[ProcessorResult | None],
         min_findings: int,
     ) -> None:

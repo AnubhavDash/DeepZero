@@ -8,6 +8,7 @@ work/
 .deepzero/
 .cache/
 ghidra_projects/
+ghidra_result.json
 
 # Virtual environments
 .env

@@ -18,14 +18,9 @@ def _make_ctx(tmp_path, config=None, llm=None, history_data=None):
     discover_data = history_data or {"sha256": "abc123", "filename": "test.sys"}
     history = {"discover": StageOutput(status="completed", data=discover_data)}
     ctx = ProcessorContext(
-        pipeline_dir=tmp_path, global_config={}, llm=locals().get("llm")
+        pipeline_dir=tmp_path, global_config={}, llm=llm
     )
     from deepzero.engine.stage import ProcessorEntry
-
-    try:
-        hist = history
-    except NameError:
-        hist = {}
 
     class MockStore:
         def __init__(self, history):
@@ -42,22 +37,12 @@ def _make_ctx(tmp_path, config=None, llm=None, history_data=None):
 
             return S(self._history)
 
-    try:
-        sample_path_val = sample_path
-    except NameError:
-        sample_path_val = tmp_path / "test.bin"
-
-    try:
-        sample_dir_val = sample_dir
-    except NameError:
-        sample_dir_val = tmp_path
-
     entry = ProcessorEntry(
         sample_id="test_sample",
-        source_path=sample_path_val,
-        filename=sample_path_val.name,
-        sample_dir=sample_dir_val,
-        _store=MockStore(hist),
+        source_path=sample_path,
+        filename=sample_path.name,
+        sample_dir=sample_dir,
+        _store=MockStore(history),
     )
     return ctx, entry
 

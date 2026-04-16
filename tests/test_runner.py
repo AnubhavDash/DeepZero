@@ -65,12 +65,6 @@ class MockReduceProcessor(ReduceProcessor):
         return [e.sample_id for e in entries[:mid]]
 
 
-class StageOutput:  # helper
-    def __init__(self, **kwargs):
-        for k, v in kwargs.items():
-            setattr(self, k, v)
-
-
 # -- tests --
 
 

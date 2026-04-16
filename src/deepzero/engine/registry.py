@@ -97,6 +97,7 @@ def _load_specific_class(file_path: Path, class_name: str) -> type[Any]:
         raise ImportError(f"cannot load processor from {file_path}")
 
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
 
     cls = getattr(module, class_name, None)
