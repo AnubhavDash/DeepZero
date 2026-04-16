@@ -215,6 +215,7 @@ def status(pipeline: str | None, work_dir: str | None, verbose: bool):
         from deepzero.engine.pipeline import load_pipeline
 
         _setup_logging(False)
+        _load_env()
         try:
             pipeline_def = load_pipeline(pipeline)
         except ValueError as e:
@@ -267,6 +268,7 @@ def status(pipeline: str | None, work_dir: str | None, verbose: bool):
 def validate(pipeline_ref: str):
     """validate a pipeline definition"""
     _setup_logging(False)
+    _load_env()
 
     import deepzero.stages  # noqa: F401
     from deepzero.engine.pipeline import validate_pipeline
@@ -426,6 +428,8 @@ def serve(host: str, port: int, work_dir: str):
         )
     console.print(f"[bold cyan]deepzero serve[/] - http://{host}:{port}")
     console.print(f"  work_dir: {work_dir}")
+
+    _load_env()
 
     from deepzero.api.server import create_app
 
