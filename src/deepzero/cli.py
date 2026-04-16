@@ -466,30 +466,11 @@ def serve(host: str, port: int, work_dir: str):
 
 
 def _print_stats(run_state, manifest: list[dict[str, Any]] | None = None) -> None:
-    per_stage: dict[str, dict[str, int]] = {}
-
-    if manifest:
-        for entry in manifest:
-            history = entry.get("history", {})
-            for stage_name, stage_data in history.items():
-                if stage_name not in per_stage:
-                    per_stage[stage_name] = {"completed": 0, "filtered": 0, "failed": 0}
-
-                st = stage_data.get("status")
-                vd = stage_data.get("verdict")
-
-                if st == "failed":
-                    per_stage[stage_name]["failed"] += 1
-                elif st == "filtered" or (st == "completed" and vd == "filter"):
-                    per_stage[stage_name]["filtered"] += 1
-                elif st == "completed":
-                    per_stage[stage_name]["completed"] += 1
-
-    # merge active stats with disk cache for accuracy
-    cached_stats = run_state.stats.get("per_stage", {})
-    for sn, sdata in cached_stats.items():
-        if sn not in per_stage:
-            per_stage[sn] = sdata
+    # `manifest` is accepted for caller compatibility, but current manifest
+    # entries do not persist per-stage history, so stage statistics must come
+    # from the run state's cached per-stage counters.
+    _ = manifest
+    per_stage: dict[str, dict[str, int]] = dict(run_state.stats.get("per_stage", {}))
 
     if not run_state.stages:
         discovered = run_state.stats.get("discovered", 0)

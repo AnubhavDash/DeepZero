@@ -113,7 +113,7 @@ class PipelineRunner:
             return self._execute_pipeline_stages(target, run_state)
         except KeyboardInterrupt:
             log.warning("interrupted by user - saving state")
-            run_state.status = RunStatus.INTERRUPTED
+            run_state.mark_interrupted()
             self.state_store.save_run(run_state)
             return run_state
         except PROCESSOR_ERRORS as e:
@@ -839,9 +839,7 @@ class PipelineRunner:
         if self._shutdown_event.is_set():
             log.warning("forced shutdown")
             if hasattr(self, "_active_run_state") and getattr(self, "_active_run_state", None):
-                from deepzero.engine.types import RunStatus
-
-                self._active_run_state.status = RunStatus.INTERRUPTED
+                self._active_run_state.mark_interrupted()
                 self.state_store.save_run(self._active_run_state)
             if hasattr(self, "_active_sample_states") and getattr(
                 self, "_active_sample_states", None
