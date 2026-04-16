@@ -34,6 +34,9 @@ def test_physical_ghidra_pipeline_run(tmp_path):
     Absolutely unmocked physical integration test interacting natively with the
     Ghidra Java Virtual Machine installed on the local system matching user specifications.
     """
+    if not os.environ.get("DEEPZERO_RUN_GHIDRA_E2E"):
+        pytest.skip("DEEPZERO_RUN_GHIDRA_E2E not set, skipping Ghidra E2E integration test")
+
     ghidra_dir = os.environ.get("GHIDRA_INSTALL_DIR")
     if not ghidra_dir or not Path(ghidra_dir).exists():
         pytest.skip(

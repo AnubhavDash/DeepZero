@@ -203,8 +203,19 @@ class GhidraDecompile(MapProcessor):
                     proc.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
                     proc.kill()
-                    proc.wait(timeout=10)
                     elapsed = time.monotonic() - start_time
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        log.warning(
+                            "ghidra timed out for %s after %.1fs and did not terminate after kill()",
+                            binary_path.name,
+                            elapsed,
+                        )
+                        return {
+                            "success": False,
+                            "error": f"ghidra timed out after {timeout}s and did not terminate after kill()",
+                        }
                     log.warning("ghidra timed out for %s after %.1fs", binary_path.name, elapsed)
                     return {"success": False, "error": f"ghidra timed out after {timeout}s"}
 

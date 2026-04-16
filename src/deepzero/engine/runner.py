@@ -333,7 +333,7 @@ class PipelineRunner:
                 run_state.mark_interrupted()
 
             self.state_store.save_run(run_state)
-            return None if not samples else sample_states
+            return None
 
         if self.dashboard:
             self.dashboard.set_transient_status(

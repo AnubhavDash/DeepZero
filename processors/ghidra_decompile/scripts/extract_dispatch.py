@@ -380,7 +380,7 @@ if __name__ == "__main__":
         try:
             output_dir = _get_output_dir()
         except Exception:
-            output_dir = os.environ.get("DEEPZERO_SAMPLES_DIR", ".")
+            output_dir = os.environ.get("DEEPZERO_OUTPUT_DIR", ".")
 
         res = {
             "success": False,
