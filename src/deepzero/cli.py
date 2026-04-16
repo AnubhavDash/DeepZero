@@ -463,10 +463,13 @@ def _print_stats(run_state, manifest: list[dict[str, Any]] | None = None) -> Non
                 elif st == "completed":
                     per_stage[stage_name]["completed"] += 1
 
-    if not per_stage:
-        per_stage = run_state.stats.get("per_stage", {})
+    # merge active stats with disk cache for accuracy
+    cached_stats = run_state.stats.get("per_stage", {})
+    for sn, sdata in cached_stats.items():
+        if sn not in per_stage:
+            per_stage[sn] = sdata
 
-    if not per_stage:
+    if not run_state.stages:
         discovered = run_state.stats.get("discovered", 0)
         if discovered:
             console.print(f"  discovered: {discovered}")
@@ -478,13 +481,19 @@ def _print_stats(run_state, manifest: list[dict[str, Any]] | None = None) -> Non
     table.add_column("filtered", style="yellow", justify="right")
     table.add_column("failed", style="red", justify="right")
 
-    for stage_name, counts in per_stage.items():
-        table.add_row(
-            stage_name,
-            str(counts.get("completed", 0)),
-            str(counts.get("filtered", 0)),
-            str(counts.get("failed", 0)),
-        )
+    for i, stage_name in enumerate(run_state.stages):
+        if i == 0:
+            # first stage is always ingest, stats are held in discovered
+            discovered = run_state.stats.get("discovered", 0)
+            table.add_row(stage_name, str(discovered), "0", "0")
+        else:
+            counts = per_stage.get(stage_name, {})
+            table.add_row(
+                stage_name,
+                str(counts.get("completed", 0)),
+                str(counts.get("filtered", 0)),
+                str(counts.get("failed", 0)),
+            )
 
     console.print(table)
 
