@@ -20,7 +20,7 @@ llm = ["litellm>=1.0"]
 serve = ["starlette>=0.27", "uvicorn>=0.22"]
 pe = ["pefile>=2023.2"]
 full = ["deepzero[llm,serve,pe]"]
-dev = ["pytest>=7.0", "deepzero[full]"]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21.0", "deepzero[full]"]
 
 [project.scripts]
 deepzero = "deepzero.cli:main"
