@@ -44,7 +44,7 @@ class _ShortNameFormatter(logging.Formatter):
             record.exc_info = None
             record.exc_text = None
 
-        record.msg = f"({short}) {record.msg}"
+        record.msg = f"[{short}] {record.msg}"
         return super().format(record)
 
 
