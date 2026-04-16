@@ -104,6 +104,7 @@ class PipelineRunner:
         target: Path,
         run_state: RunState,
     ) -> RunState:
+        self._active_run_state = run_state
         self._install_signal_handler()
         run_state.mark_running()
         self.state_store.save_run(run_state)
@@ -159,6 +160,7 @@ class PipelineRunner:
         stage_names: list[str],
     ) -> RunState:
         sample_states = self._resume_or_ingest(target, run_state, stage_names)
+        self._active_sample_states = sample_states
         if sample_states is None:
             return run_state
 
@@ -836,6 +838,12 @@ class PipelineRunner:
     def _handle_signal(self, signum, frame) -> None:
         if self._shutdown_event.is_set():
             log.warning("forced shutdown")
+            if hasattr(self, "_active_run_state") and getattr(self, "_active_run_state", None):
+                from deepzero.engine.types import RunStatus
+                self._active_run_state.status = RunStatus.INTERRUPTED
+                self.state_store.save_run(self._active_run_state)
+            if hasattr(self, "_active_sample_states") and getattr(self, "_active_sample_states", None):
+                self.state_store.save_manifest(list(self._active_sample_states.values()))
             os._exit(1)
         log.warning("shutdown requested (press ctrl+c again to force)")
         self._shutdown_event.set()
