@@ -79,12 +79,13 @@ class GhidraDecompile(MapProcessor):
         if self.config.max_depth is not None:
             extra_env["DEEPZERO_MAX_DEPTH"] = str(self.config.max_depth)
 
+        active_timeout = self.spec.timeout if self.spec.timeout > 0 else self.config.timeout
         result = self._run_ghidra_headless(
             binary_path=entry.source_path,
             output_dir=output_dir,
             ghidra_install_dir=ghidra_dir,
             post_script=script_path,
-            timeout=self.config.timeout,
+            timeout=active_timeout,
             java_home=java_home,
             extra_env=extra_env if extra_env else None,
         )
