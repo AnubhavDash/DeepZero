@@ -232,7 +232,7 @@ desloppify plan commit-log pr                   # preview PR body markdown
 desloppify config set commit_tracking_enabled false  # disable guidance
 ```
 
-After resolving findings as `fixed`, the tool shows uncommitted work, committed history, and a suggested commit message. After committing externally, run `record` to move findings from uncommitted to committed and auto-update the linked PR description.
+After resolving findings as `fixed`, the processor shows uncommitted work, committed history, and a suggested commit message. After committing externally, run `record` to move findings from uncommitted to committed and auto-update the linked PR description.
 
 ### Agent directives
 
@@ -268,7 +268,7 @@ When desloppify itself appears wrong or inconsistent — a bug, a bad detection,
 
 ### Fix and PR (preferred)
 
-Clone the tool repo to a temp directory, make the fix there, and verify it works against the project you're scanning before pushing.
+Clone the processor repo to a temp directory, make the fix there, and verify it works against the project you're scanning before pushing.
 
 ```bash
 git clone https://github.com/peteromallet/desloppify.git /tmp/desloppify-fix

@@ -8,28 +8,32 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from deepzero.engine.stage import BatchEntry, BatchTool, StageResult
+from deepzero.engine.stage import Sample, BulkMapProcessor, ProcessorResult, ProcessorContext
 
 
-class SemgrepScannerTool(BatchTool):
-    # runs one semgrep process against all active samples using a temp-copy pattern
+class SemgrepScanner(BulkMapProcessor):
+    description = "runs semgrep batch scan against decompiled source across all active samples"
 
-    def execute_batch(self, entries: list[BatchEntry], config: dict[str, Any]) -> list[StageResult]:
-        rules_dir = config.get("rules_dir")
+    def validate(self) -> list[str]:
+        if not shutil.which("semgrep"):
+            return ["semgrep CLI not found in PATH — install with: pip install semgrep"]
+        return []
+
+    def process(self, ctx: ProcessorContext, entries: list[Sample]) -> list[ProcessorResult]:
+        rules_dir = self.config.get("rules_dir")
         if not rules_dir:
-            return [StageResult(status="failed", error="semgrep_scanner requires 'rules_dir' in config")] * len(entries)
+            return [ProcessorResult.fail("semgrep_scanner requires 'rules_dir' in config")] * len(entries)
 
         rules_path = (Path.cwd() / rules_dir).resolve()
         if not rules_path.exists():
-            return [StageResult(status="failed", error=f"semgrep rules dir not found: {rules_path}")] * len(entries)
+            return [ProcessorResult.fail(f"semgrep rules dir not found: {rules_path}")] * len(entries)
 
-        target_subdir = config.get("target_dir", "decompiled")
-        timeout = config.get("timeout", 300)
-        min_findings = config.get("min_findings", 0)
+        target_subdir = self.config.get("target_dir", "decompiled")
+        timeout = self.config.get("timeout", 300)
+        min_findings = self.config.get("min_findings", 0)
 
-        # check for cached results first
-        results: list[StageResult | None] = [None] * len(entries)
-        uncached_entries: list[tuple[int, BatchEntry]] = []
+        results: list[ProcessorResult | None] = [None] * len(entries)
+        uncached_entries: list[tuple[int, Sample]] = []
 
         for i, entry in enumerate(entries):
             findings_path = entry.sample_dir / "findings.json"
@@ -41,12 +45,10 @@ class SemgrepScannerTool(BatchTool):
                 except (json.JSONDecodeError, OSError) as exc:
                     self.log.debug("cache read failed for %s, rescanning: %s", entry.sample_id, exc)
 
-            # verify scan target exists
             scan_dir = entry.sample_dir / target_subdir
             if not scan_dir.exists():
-                results[i] = StageResult(
-                    status="failed",
-                    error=f"scan target '{target_subdir}' missing - does a decompile tool run before this?",
+                results[i] = ProcessorResult.fail(
+                    f"scan target '{target_subdir}' missing — does a decompile processor run before this?"
                 )
                 continue
 
@@ -55,14 +57,11 @@ class SemgrepScannerTool(BatchTool):
         if not uncached_entries:
             return [r for r in results if r is not None]
 
-        # temp-copy pattern: hardlink (or copy) all .c files into a batch dir
-        # lives inside work dir to guarantee same-volume for hardlinks
-        batch_dir = entries[0].sample_dir.parent.parent / ".batch_temp" / "semgrep"
-        if batch_dir.exists():
-            shutil.rmtree(batch_dir, ignore_errors=True)
-        batch_dir.mkdir(parents=True, exist_ok=True)
+        bulk_dir = entries[0].sample_dir.parent.parent / ".bulk_temp" / "semgrep"
+        if bulk_dir.exists():
+            shutil.rmtree(bulk_dir, ignore_errors=True)
+        bulk_dir.mkdir(parents=True, exist_ok=True)
 
-        # track which files belong to which sample
         file_to_sample: dict[str, int] = {}
 
         for idx, entry in uncached_entries:
@@ -72,9 +71,8 @@ class SemgrepScannerTool(BatchTool):
                     continue
                 if src_file.suffix not in (".c", ".h", ".cpp", ".py"):
                     continue
-                # unique name: {sample_id}_{filename}
                 dest_name = f"{entry.sample_id}_{src_file.name}"
-                dest = batch_dir / dest_name
+                dest = bulk_dir / dest_name
                 try:
                     os.link(src_file, dest)
                 except OSError:
@@ -82,16 +80,13 @@ class SemgrepScannerTool(BatchTool):
                 file_to_sample[dest_name] = idx
 
         if not file_to_sample:
-            # nothing to scan - all entries had no scannable files
             for idx, _entry in uncached_entries:
-                results[idx] = StageResult(
-                    status="completed", verdict="continue",
+                results[idx] = ProcessorResult.ok(
                     data={"finding_count": 0, "findings_cached": False},
                 )
-            self._cleanup_batch_dir(batch_dir)
+            self._cleanup_bulk_dir(bulk_dir)
             return [r for r in results if r is not None]
 
-        # one semgrep invocation for the entire batch
         cmd = [
             "semgrep", "scan",
             "--config", str(rules_path),
@@ -100,41 +95,40 @@ class SemgrepScannerTool(BatchTool):
             "--quiet",
             "--metrics=off",
             "--disable-version-check",
-            str(batch_dir),
+            str(bulk_dir),
         ]
 
-        self.log.info("batch scanning %d files from %d samples", len(file_to_sample), len(uncached_entries))
+        self.log.info("bulk scanning %d files from %d samples", len(file_to_sample), len(uncached_entries))
 
         try:
             proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
         except FileNotFoundError:
-            self._cleanup_batch_dir(batch_dir)
+            self._cleanup_bulk_dir(bulk_dir)
             for idx, _ in uncached_entries:
-                results[idx] = StageResult(status="failed", error="semgrep not installed - pip install semgrep")
+                results[idx] = ProcessorResult.fail("semgrep not installed — pip install semgrep")
             return [r for r in results if r is not None]
         except subprocess.TimeoutExpired:
-            self._cleanup_batch_dir(batch_dir)
+            self._cleanup_bulk_dir(bulk_dir)
             for idx, _ in uncached_entries:
-                results[idx] = StageResult(status="failed", error=f"semgrep batch timed out after {timeout}s")
+                results[idx] = ProcessorResult.fail(f"semgrep batch timed out after {timeout}s")
             return [r for r in results if r is not None]
 
         if proc.returncode not in (0, 1):
             err = proc.stderr.decode("utf-8", errors="replace")[:500]
-            self._cleanup_batch_dir(batch_dir)
+            self._cleanup_bulk_dir(bulk_dir)
             for idx, _ in uncached_entries:
-                results[idx] = StageResult(status="failed", error=f"semgrep error: {err}")
+                results[idx] = ProcessorResult.fail(f"semgrep error: {err}")
             return [r for r in results if r is not None]
 
         try:
             out_str = proc.stdout.decode("utf-8", errors="replace")
             output = json.loads(out_str) if out_str.strip() else {}
         except json.JSONDecodeError:
-            self._cleanup_batch_dir(batch_dir)
+            self._cleanup_bulk_dir(bulk_dir)
             for idx, _ in uncached_entries:
-                results[idx] = StageResult(status="failed", error="failed to parse semgrep json output")
+                results[idx] = ProcessorResult.fail("failed to parse semgrep json output")
             return [r for r in results if r is not None]
 
-        # map findings back to samples
         sev_map = {"ERROR": "HIGH", "WARNING": "MEDIUM", "INFO": "LOW"}
         per_sample_findings: dict[int, list[dict]] = {idx: [] for idx, _ in uncached_entries}
 
@@ -142,7 +136,6 @@ class SemgrepScannerTool(BatchTool):
             file_path = result_entry.get("path", "")
             filename = Path(file_path).name
 
-            # find which sample this file belongs to
             sample_idx = file_to_sample.get(filename)
             if sample_idx is None:
                 continue
@@ -159,7 +152,6 @@ class SemgrepScannerTool(BatchTool):
             }
             per_sample_findings[sample_idx].append(finding)
 
-        # write findings and build results
         for idx, entry in uncached_entries:
             findings = per_sample_findings.get(idx, [])
             findings_path = entry.sample_dir / "findings.json"
@@ -176,27 +168,25 @@ class SemgrepScannerTool(BatchTool):
                 self.log.debug("failed to write findings for %s", entry.sample_id)
             results[idx] = self._make_result(findings, min_findings, cached=False)
 
-        self._cleanup_batch_dir(batch_dir)
+        self._cleanup_bulk_dir(bulk_dir)
         return [r for r in results if r is not None]
 
-    def _make_result(self, findings: list[dict], min_findings: int, cached: bool) -> StageResult:
+    def _make_result(self, findings: list[dict], min_findings: int, cached: bool) -> ProcessorResult:
         data: dict[str, Any] = {"finding_count": len(findings), "findings_cached": cached}
 
         if min_findings > 0 and len(findings) < min_findings:
-            data["reject_reason"] = f"{len(findings)} findings < min {min_findings}"
-            return StageResult(
-                status="completed", verdict="skip",
-                artifacts={"findings": "findings.json"}, data=data,
+            return ProcessorResult.filter(
+                f"{len(findings)} findings < min {min_findings}",
+                data={**data, "findings": "findings.json"},
             )
 
-        return StageResult(
-            status="completed", verdict="continue",
-            artifacts={"findings": "findings.json"}, data=data,
+        return ProcessorResult.ok(
+            artifacts={"findings": "findings.json"},
+            data=data,
         )
 
-    def _cleanup_batch_dir(self, batch_dir: Path) -> None:
+    def _cleanup_bulk_dir(self, bulk_dir: Path) -> None:
         try:
-            shutil.rmtree(batch_dir, ignore_errors=True)
+            shutil.rmtree(bulk_dir, ignore_errors=True)
         except OSError:
-            # rmtree with ignore_errors already handles most failures
-            self.log.debug("batch dir cleanup failed: %s", batch_dir)
+            self.log.debug("batch dir cleanup failed: %s", bulk_dir)

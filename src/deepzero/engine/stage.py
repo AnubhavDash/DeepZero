@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, Protocol, TypedDict, runtime_checkable
+from typing import Any, Protocol, TypedDict, runtime_checkable, ClassVar
 
-from deepzero.engine.state import SampleState, StageOutput
+from deepzero.engine.types import StageStatus, Verdict
+from deepzero.engine.state import StageOutput
 
 
 @runtime_checkable
 class LLMProtocol(Protocol):
-    # contract for any LLM provider - at minimum must support complete()
     def complete(
         self,
         messages: list[dict[str, str]],
@@ -25,24 +25,25 @@ class LLMProtocol(Protocol):
 
 
 class GlobalConfig(TypedDict, total=False):
-    # typed config passed to stages - replaces dict[str, Any]
     settings: dict[str, Any]
-    tools: dict[str, Any]
     knowledge: dict[str, Any]
     model: str
 
 
-class ToolType(str, Enum):
+class ProcessorType(str, Enum):
     INGEST = "ingest"
     MAP = "map"
     REDUCE = "reduce"
-    BATCH = "batch"
+    BULK_MAP = "bulk_map"
 
 
 class FailurePolicy(str, Enum):
     SKIP = "skip"
     RETRY = "retry"
     ABORT = "abort"
+
+
+# -- data structures --
 
 
 @dataclass
@@ -53,87 +54,178 @@ class Sample:
     source_path: Path
     # display name
     filename: str
-    # initial data from discovery - goes into history["discover"].data
+    # initial data from discovery — goes into history["discover"].data
     data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class StageContext:
-    # the original sample file
-    sample_path: Path
+class ProcessorEntry:
+    # --- Populated dynamically by the Engine for downstream processors ---
+    sample_id: str
+    source_path: Path
+    filename: str
+    
     # working directory for this sample (work/<pipeline>/samples/<id>/)
-    sample_dir: Path
-    # full provenance chain - history[stage_name].data for upstream access
-    history: dict[str, StageOutput]
-    # this stage's config block from the pipeline yaml
-    config: dict[str, Any]
-    # the pipeline directory root (for resolving relative paths)
-    pipeline_dir: Path
-    # global pipeline config (settings, tools, knowledge)
-    global_config: GlobalConfig
-    # llm provider if configured - must implement LLMProtocol
-    llm: LLMProtocol | None
-    # logger for this stage
-    log: logging.Logger = field(default_factory=lambda: logging.getLogger("deepzero.stage"))
+    sample_dir: Path | None = None
+    
+    # attached automatically by the runner to enable memory-efficient lazy-loading
+    _store: Any = field(default=None, repr=False, compare=False)
+
+    @property
+    def history(self) -> dict[str, StageOutput]:
+        """Lazy load the execution history from disk only when actively accessed."""
+        if hasattr(self, "_history"):
+            return self._history
+        if self._store is None:
+            return {}
+        return self._store.load_sample(self.sample_id).history
+
+    def upstream(self, processor_name: str) -> StageOutput | None:
+        # get the full output from a previous processor
+        return self.history.get(processor_name)
+
+    def upstream_data(self, processor_name: str, key: str, default: Any = None) -> Any:
+        # shorthand to grab a specific data field from an upstream processor
+        output = self.history.get(processor_name)
+        if output is None:
+            return default
+        return output.data.get(key, default)
 
 
 @dataclass
-class StageResult:
-    status: Literal["completed", "failed"]
-    # continue = proceed to next stage, skip = stop processing this sample
-    verdict: Literal["continue", "skip"] = "continue"
-    # name -> relative path of files this stage produced
+class ProcessorContext:
+    # pipeline directory root (for resolving relative paths in config)
+    pipeline_dir: Path
+    # global pipeline config (settings, knowledge, model)
+    global_config: GlobalConfig
+    # llm provider if configured
+    llm: LLMProtocol | None
+    # logger scoped to this processor instance
+    log: logging.Logger = field(default_factory=lambda: logging.getLogger("deepzero.processor"))
+
+    def get_setting(self, key: str, default: Any = None) -> Any:
+        # shorthand to grab a pipeline setting
+        return self.global_config.get("settings", {}).get(key, default)
+
+    def get_knowledge(self, key: str, default: Any = None) -> Any:
+        # shorthand to grab pipeline knowledge
+        return self.global_config.get("knowledge", {}).get(key, default)
+
+
+@dataclass
+class ProcessorResult:
+    # "completed" = processor ran to completion, "failed" = something broke
+    status: StageStatus
+    # "continue" = sample moves downstream, "filter" = sample intentionally excluded
+    verdict: Verdict = Verdict.CONTINUE
+    # name -> relative path of files this processor produced
     artifacts: dict[str, str] = field(default_factory=dict)
-    # namespaced output - written to history[stage_name].data, never merged
+    # namespaced output — written to history[processor_name].data
     data: dict[str, Any] = field(default_factory=dict)
-    # if failed, why
+    # human-readable error message if status is "failed"
     error: str | None = None
 
+    @classmethod
+    def ok(cls, data: dict[str, Any] | None = None, artifacts: dict[str, str] | None = None) -> ProcessorResult:
+        # sample processed successfully, continue downstream
+        return cls(status=StageStatus.COMPLETED, data=data or {}, artifacts=artifacts or {})
 
-@dataclass
-class BatchEntry:
-    # lightweight struct passed to BatchTool.execute_batch
-    sample_id: str
-    sample_dir: Path
-    source_path: Path
-    history: dict[str, StageOutput]
+    @classmethod
+    def filter(cls, reason: str = "", data: dict[str, Any] | None = None) -> ProcessorResult:
+        # sample intentionally excluded from further processing
+        d = dict(data) if data else {}
+        if reason:
+            d["filter_reason"] = reason
+        return cls(status=StageStatus.COMPLETED, verdict=Verdict.FILTER, data=d)
+
+    @classmethod
+    def fail(cls, error: str) -> ProcessorResult:
+        # processing failed — sample is dead
+        return cls(status=StageStatus.FAILED, error=error)
 
 
 @dataclass
 class StageSpec:
     # unique instance name within the pipeline
     name: str
-    # tool reference (bare name for built-in, dir/file.py for tools/ directory)
-    tool: str
-    # stage config from yaml
+    # processor reference — bare name for built-in, dir/file.py for external
+    processor: str
+    # processor config from yaml — parsed into a Config dataclass if the processor declares one
     config: dict[str, Any] = field(default_factory=dict)
-    # concurrency: how many samples to process in parallel for this stage (0 = max hardware)
+    # concurrency: how many samples to process in parallel (0 = auto/max hardware)
     parallel: int = 0
-    # what to do when a sample fails this stage
+    # what to do when a sample fails this processor
     on_failure: FailurePolicy = FailurePolicy.SKIP
     # max retries on failure (only used when on_failure=retry)
     max_retries: int = 0
-    # timeout in seconds (0 = no timeout)
+    # timeout in seconds per sample (0 = no timeout)
     timeout: int = 0
 
 
-# -- tool base classes --
+# -- processor base classes --
+#
+# a pipeline is a sequence of processors that transform a sample stream.
+# community authors subclass one of these four base classes.
+# each type has a different relationship with the sample stream:
+#
+#   IngestProcessor  — discovers samples from a source
+#   MapProcessor     — transforms one sample at a time
+#   ReduceProcessor  — sees all samples, decides who survives
+#   BulkMapProcessor   — processes all samples in one invocation
 
 
-class Tool(ABC):
-    # root base class for all pipeline tools
-    tool_type: ToolType
+class Processor(ABC):
+    # which lane of the pipeline this processor operates in
+    processor_type: ProcessorType
 
-    # set by the resolver to the path of the .py file that defines this tool
+    # subclass with a @dataclass to declare accepted config fields.
+    # the engine instantiates it from the YAML config dict at pipeline load time.
+    # if None, the processor receives the raw config dict.
+    #
+    # config fields can read from environment variables via YAML syntax:
+    #   config:
+    #     install_dir: ${GHIDRA_INSTALL_DIR}
+    #     java_home: ${JAVA_HOME:-/usr/lib/jvm/default}
+    #
+    # the engine expands ${VAR} and ${VAR:-default} before parsing.
+    # use validate() to check if required fields are empty after expansion.
+    Config: ClassVar[type | None] = None
+
+    # human-readable metadata — used by `deepzero list-processors` and future web UI
+    description: ClassVar[str] = ""
+    version: ClassVar[str] = "1.0"
+
+    # set by the resolver to the path of the .py file that defines this processor
     _source_file: Path | None = None
 
     def __init__(self, spec: StageSpec):
         self.spec = spec
-        self.log = logging.getLogger(f"deepzero.tool.{spec.name}")
+        self.log = logging.getLogger(f"deepzero.processor.{spec.name}")
+        self.config = self._parse_config(spec.config)
+        # set by the engine before setup() is called
+        self.global_config: GlobalConfig = {}
+
+    def _parse_config(self, raw: dict) -> Any:
+        if self.Config is None:
+            return raw
+        valid = {f.name for f in fields(self.Config)}
+        filtered = {k: v for k, v in raw.items() if k in valid}
+        return self.Config(**filtered)
+
+    def validate(self) -> list[str]:
+        # override to check dependencies at pipeline load time, before any sample is touched.
+        # return a list of problems. empty list = all good.
+        #
+        # examples:
+        #   - check that a required config field is not empty
+        #   - check that an external binary exists on disk
+        #   - check that a rules directory contains .yaml files
+        return []
 
     @property
-    def tool_dir(self) -> Path:
-        # directory containing this tool's source file
+    def processor_dir(self) -> Path:
+        # directory containing this processor's source file — useful for locating
+        # co-located assets like scripts, templates, or rule files
         if self._source_file is not None:
             return self._source_file.parent
         import inspect
@@ -141,153 +233,186 @@ class Tool(ABC):
 
     @property
     def cache_dir(self) -> Path:
-        # persistent cache directory for this tool instance
+        # persistent cache directory for this processor instance
         d = Path.cwd() / ".cache" / self.spec.name
         d.mkdir(parents=True, exist_ok=True)
         return d
 
     def setup(self, global_config: dict[str, Any]) -> None:
-        # called once before batch execution
+        # called once before pipeline execution begins
         pass
 
     def teardown(self) -> None:
-        # called once after batch execution
+        # called once after pipeline execution completes
         pass
 
 
-class IngestTool(Tool):
-    # discovers samples from a target path or source
-    tool_type = ToolType.INGEST
+class IngestProcessor(Processor):
+    # discovers samples from a target path, API, or manifest.
+    # always the first stage in a pipeline. runs once, not per-sample.
+    #
+    #   /target/path ──▶ [ IngestProcessor ] ──▶ sample_a, sample_b, sample_c ...
+    #
+    # use for: file discovery, PE parsing, API ingestion, manifest loading.
+    # access self.config for typed config, self.global_config for pipeline-level settings.
+    processor_type = ProcessorType.INGEST
 
     @abstractmethod
-    def discover(self, target: Path, config: dict[str, Any], global_config: dict[str, Any]) -> list[Sample]:
+    def process(self, ctx: ProcessorContext, target: Path) -> list[Sample]:
         ...
 
 
-class MapTool(Tool):
-    # processes one sample at a time - engine fans out with ThreadPoolExecutor
-    tool_type = ToolType.MAP
+class MapProcessor(Processor):
+    # processes one sample at a time. the engine fans out via ThreadPoolExecutor.
+    # must be thread-safe — no shared mutable state in process().
+    #
+    #   sample_a ──▶ [ MapProcessor ] ──▶ result_a   (ok / filter / fail)
+    #   sample_b ──▶ [ MapProcessor ] ──▶ result_b   ← parallel via thread pool
+    #   sample_c ──▶ [ MapProcessor ] ──▶ result_c
+    #
+    # use for: filtering, decompilation, LLM analysis, metadata extraction.
+    # return ProcessorResult.ok(), .filter(), or .fail().
+    processor_type = ProcessorType.MAP
 
     @abstractmethod
-    def process(self, ctx: StageContext) -> StageResult:
+    def process(self, ctx: ProcessorContext, entry: ProcessorEntry) -> ProcessorResult:
         ...
 
-    def should_skip(self, ctx: StageContext) -> str | None:
-        # override to skip already-processed samples (e.g. cached decompilation)
+    def should_skip(self, ctx: ProcessorContext, entry: ProcessorEntry) -> str | None:
+        # override to skip already-processed samples (e.g. cached output files).
+        # return a reason string to skip, or None to process normally.
+        # skipped samples count as "passed" — the work was already done previously.
         return None
 
 
-class ReduceTool(Tool):
-    # sees ALL active samples at once - the synchronization barrier
-    tool_type = ToolType.REDUCE
+class ReduceProcessor(Processor):
+    # sees ALL active samples at once. returns which survive and in what order.
+    # guarantees INTERDEPENDENCE: must have access to 100% of the active pipeline corpus.
+    # by design, the engine cannot auto-chunk Reduce processors.
+    # It acts as a global synchronization barrier for the pipeline.
+    #
+    #   ┌ sample_a ┐                      ┌ sample_c ┐
+    #   │ sample_b │ ──▶ [ Reduce ] ──▶   │ sample_a │  (reordered, sample_b filtered)
+    #   │ sample_c │                      └──────────┘
+    #   └──────────┘
+    #
+    # use for: top-k selection, sorting by priority, deduplication, global ranking.
+    # return a list of sample_ids to KEEP, in the desired order.
+    # everything not returned is filtered out.
+    processor_type = ProcessorType.REDUCE
 
     @abstractmethod
-    def reduce(self, states: list[SampleState], config: dict[str, Any]) -> list[SampleState]:
-        # mutate verdict on losers to "skipped", return the full list
+    def process(self, ctx: ProcessorContext, entries: list[ProcessorEntry]) -> list[str]:
         ...
 
 
-class BatchTool(Tool):
-    # processes all active samples in one external invocation
-    tool_type = ToolType.BATCH
+class BulkMapProcessor(Processor):
+    # all active samples processed in one external invocation.
+    # more efficient than MapProcessor when the external process has high startup cost.
+    #
+    #   ┌ sample_a ┐                      ┌ result_a ┐
+    #   │ sample_b │ ──▶ [ Batch ] ──▶    │ result_b │  (one process invocation)
+    #   │ sample_c │                      │ result_c │
+    #   └──────────┘                      └──────────┘
+    #
+    # use for: semgrep scanning, batch static analysis, bulk API calls.
+    # return one ProcessorResult per entry, matched by index.
+    # if fewer results than entries, extras are marked as failed.
+    processor_type = ProcessorType.BULK_MAP
 
     @abstractmethod
-    def execute_batch(self, entries: list[BatchEntry], config: dict[str, Any]) -> list[StageResult]:
-        # return one StageResult per entry, matched by index
+    def process(self, ctx: ProcessorContext, entries: list[ProcessorEntry]) -> list[ProcessorResult]:
         ...
 
 
-# -- tool registry --
-
-_TOOL_REGISTRY: dict[str, type[Tool]] = {}
+# -- processor registry --
 
 
-def register_tool(name: str, cls: type[Tool]) -> None:
-    _TOOL_REGISTRY[name] = cls
+_PROCESSOR_REGISTRY: dict[str, type[Processor]] = {}
 
 
-def get_registered_tools() -> dict[str, type[Tool]]:
-    return dict(_TOOL_REGISTRY)
+def register_processor(name: str, cls: type[Processor]) -> None:
+    _PROCESSOR_REGISTRY[name] = cls
 
 
-def resolve_tool_class(tool_ref: str) -> type[Tool]:
-    # resolution:
+def get_registered_processors() -> dict[str, type[Processor]]:
+    return dict(_PROCESSOR_REGISTRY)
+
+
+def resolve_processor_class(processor_ref: str) -> type[Processor]:
+    # resolution order:
     #   bare name              = built-in registry (e.g. "metadata_filter")
-    #   dir/file.py            = tools/<dir>/<file>.py, first Tool subclass
-    #   dir/file.py:ClassName  = tools/<dir>/<file>.py, specific class
+    #   dir/file.py            = processors/<dir>/<file>.py, first Processor subclass
+    #   dir/file.py:ClassName  = processors/<dir>/<file>.py, specific class
 
-    # contains a slash = path within tools/
-    if "/" in tool_ref or "\\" in tool_ref:
-        return _resolve_from_tools_dir(tool_ref)
+    if "/" in processor_ref or "\\" in processor_ref:
+        return _resolve_from_processors_dir(processor_ref)
 
-    # built-in registry
-    if tool_ref in _TOOL_REGISTRY:
-        return _TOOL_REGISTRY[tool_ref]
+    if processor_ref in _PROCESSOR_REGISTRY:
+        return _PROCESSOR_REGISTRY[processor_ref]
 
-    # dotted import (has colon but no slash, e.g. "my_package.tools:MyTool")
-    if ":" in tool_ref:
-        return _resolve_from_dotted(tool_ref)
+    if ":" in processor_ref:
+        return _resolve_from_dotted(processor_ref)
 
     raise ValueError(
-        f"unknown tool '{tool_ref}'. bare names only match built-in tools. "
-        f"for project tools use '<dir>/<file>.py' (relative to tools/). "
-        f"built-ins: {list(_TOOL_REGISTRY.keys())}"
+        f"unknown processor '{processor_ref}'. bare names match built-in processors only. "
+        f"for external processors use '<dir>/<file>.py' (relative to processors/). "
+        f"built-ins: {list(_PROCESSOR_REGISTRY.keys())}"
     )
 
 
-def _resolve_from_tools_dir(tool_ref: str) -> type[Tool]:
-    tools_root = Path.cwd() / "tools"
+def _resolve_from_processors_dir(processor_ref: str) -> type[Processor]:
+    processors_root = Path.cwd() / "processors"
 
-    # split optional :ClassName
     class_name = None
-    path_part = tool_ref
-    if ":" in tool_ref:
-        path_part, class_name = tool_ref.rsplit(":", 1)
+    path_part = processor_ref
+    if ":" in processor_ref:
+        path_part, class_name = processor_ref.rsplit(":", 1)
 
-    abs_path = (tools_root / path_part).resolve()
+    abs_path = (processors_root / path_part).resolve()
 
     if not abs_path.exists():
         raise FileNotFoundError(
-            f"tool not found: {abs_path} "
-            f"(resolved '{tool_ref}' relative to tools/)"
+            f"processor not found: {abs_path} "
+            f"(resolved '{processor_ref}' relative to processors/)"
         )
 
     if abs_path.is_file():
         if class_name:
             cls = _load_specific_class(abs_path, class_name)
         else:
-            cls = _load_tool_from_file(abs_path)
+            cls = _load_processor_from_file(abs_path)
             if cls is None:
-                raise ImportError(f"no Tool subclass found in {abs_path}")
+                raise ImportError(f"no Processor subclass found in {abs_path}")
         cls._source_file = abs_path
         return cls
 
     raise FileNotFoundError(
-        f"'{tool_ref}' resolved to '{abs_path}' which is not a .py file. "
-        f"use '<dir>/<file>.py' format, e.g. 'pe_ingest/pe_ingest.py'"
+        f"'{processor_ref}' resolved to '{abs_path}' which is not a .py file. "
+        f"use '<dir>/<file>.py' format, e.g. 'ghidra_decompile/ghidra_decompile.py'"
     )
 
 
-def _load_specific_class(file_path: Path, class_name: str) -> type[Tool]:
+def _load_specific_class(file_path: Path, class_name: str) -> type[Processor]:
     import importlib.util
     spec = importlib.util.spec_from_file_location(f"deepzero.custom.{file_path.stem}", file_path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load tool from {file_path}")
+        raise ImportError(f"cannot load processor from {file_path}")
 
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
     cls = getattr(module, class_name, None)
     if cls is None:
-        raise AttributeError(f"tool file {file_path} has no class '{class_name}'")
-    if not (isinstance(cls, type) and issubclass(cls, Tool)):
-        raise TypeError(f"'{class_name}' in {file_path} is not a Tool subclass")
+        raise AttributeError(f"processor file {file_path} has no class '{class_name}'")
+    if not (isinstance(cls, type) and issubclass(cls, Processor)):
+        raise TypeError(f"'{class_name}' in {file_path} is not a Processor subclass")
 
     cls._source_file = file_path
     return cls
 
 
-def _load_tool_from_file(file_path: Path) -> type[Tool] | None:
+def _load_processor_from_file(file_path: Path) -> type[Processor] | None:
     import importlib.util
     spec = importlib.util.spec_from_file_location(f"deepzero.custom.{file_path.stem}", file_path)
     if spec is None or spec.loader is None:
@@ -298,23 +423,23 @@ def _load_tool_from_file(file_path: Path) -> type[Tool] | None:
 
     for attr_name in dir(module):
         attr = getattr(module, attr_name)
-        if isinstance(attr, type) and issubclass(attr, Tool) and attr is not Tool:
-            if any(attr is base for base in (IngestTool, MapTool, ReduceTool, BatchTool)):
+        if isinstance(attr, type) and issubclass(attr, Processor) and attr is not Processor:
+            if any(attr is base for base in (IngestProcessor, MapProcessor, ReduceProcessor, BulkMapProcessor)):
                 continue
             return attr
 
     return None
 
 
-def _resolve_from_dotted(tool_ref: str) -> type[Tool]:
-    module_path, class_name = tool_ref.rsplit(":", 1)
+def _resolve_from_dotted(processor_ref: str) -> type[Processor]:
+    module_path, class_name = processor_ref.rsplit(":", 1)
     import importlib
     module = importlib.import_module(module_path)
     cls = getattr(module, class_name, None)
 
     if cls is None:
         raise AttributeError(f"module '{module_path}' has no attribute '{class_name}'")
-    if not (isinstance(cls, type) and issubclass(cls, Tool)):
-        raise TypeError(f"'{class_name}' in '{module_path}' is not a Tool subclass")
+    if not (isinstance(cls, type) and issubclass(cls, Processor)):
+        raise TypeError(f"'{class_name}' in '{module_path}' is not a Processor subclass")
 
     return cls

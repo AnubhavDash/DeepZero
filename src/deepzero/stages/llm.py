@@ -8,33 +8,33 @@ from typing import Any
 
 import jinja2
 
-from deepzero.engine.stage import MapTool, StageContext, StageResult
+from deepzero.engine.stage import MapProcessor, ProcessorContext, ProcessorResult, ProcessorEntry
 
 _log = logging.getLogger("deepzero.stages.llm")
 
 
-class GenericLLM(MapTool):
-    # generic LLM assessment - sends context to an LLM via a jinja2 prompt template
+class GenericLLM(MapProcessor):
+    description = "generic LLM assessment — sends context to an LLM via a jinja2 prompt template"
 
-    def process(self, ctx: StageContext) -> StageResult:
+    def process(self, ctx: ProcessorContext, entry: ProcessorEntry) -> ProcessorResult:
         if ctx.llm is None:
-            return StageResult(status="failed", error="no llm provider configured")
+            return ProcessorResult.fail("no llm provider configured")
 
-        prompt_ref = ctx.config.get("prompt", "")
+        prompt_ref = self.config.get("prompt", "")
         if not prompt_ref:
-            return StageResult(status="failed", error="no prompt template configured")
+            return ProcessorResult.fail("no prompt template configured")
 
-        prompt_text = self._render_prompt(prompt_ref, ctx)
+        prompt_text = self._render_prompt(prompt_ref, ctx, entry)
 
-        output_file = ctx.config.get("output_file", "assessment.md")
-        output_path = ctx.sample_dir / output_file
+        output_file = self.config.get("output_file", "assessment.md")
+        output_path = entry.sample_dir / output_file
         if output_path.exists():
             self.log.info("output already cached: %s", output_path.name)
             content = output_path.read_text(encoding="utf-8", errors="replace")
-            return self._make_result(content, output_file, ctx.config)
+            return self._make_result(content, output_file)
 
-        max_retries = ctx.config.get("max_retries", 3)
-        backoff_config = ctx.config.get("backoff", {})
+        max_retries = self.config.get("max_retries", 3)
+        backoff_config = self.config.get("backoff", {})
 
         messages = [{"role": "user", "content": prompt_text}]
 
@@ -51,12 +51,12 @@ class GenericLLM(MapTool):
         os.replace(tmp, output_path)
         self.log.info("response written to %s (%d chars)", output_file, len(response))
 
-        return self._make_result(response, output_file, ctx.config)
+        return self._make_result(response, output_file)
 
-    def _make_result(self, content: str, output_file: str, config: dict) -> StageResult:
+    def _make_result(self, content: str, output_file: str) -> ProcessorResult:
         data: dict[str, Any] = {"llm_output_file": output_file}
 
-        classify_by = config.get("classify_by", "")
+        classify_by = self.config.get("classify_by", "")
         if classify_by:
             import re
             match = re.search(classify_by, content[:200], re.IGNORECASE)
@@ -64,19 +64,17 @@ class GenericLLM(MapTool):
                 verdict_text = match.group(0).strip("[]").lower()
                 data["classification"] = verdict_text
 
-        return StageResult(
-            status="completed",
-            verdict="continue",
+        return ProcessorResult.ok(
             artifacts={"llm_output": output_file},
             data=data,
         )
 
-    def _render_prompt(self, prompt_ref: str, ctx: StageContext) -> str:
+    def _render_prompt(self, prompt_ref: str, ctx: ProcessorContext, entry: ProcessorEntry) -> str:
         template_path = self._resolve_template(prompt_ref)
 
         if template_path is not None:
             raw = template_path.read_text(encoding="utf-8")
-            template_vars = self._build_template_vars(ctx)
+            template_vars = self._build_template_vars(ctx, entry)
 
             env = jinja2.Environment(
                 loader=jinja2.FileSystemLoader(str(template_path.parent)),
@@ -88,25 +86,25 @@ class GenericLLM(MapTool):
 
         return prompt_ref
 
-    def _build_template_vars(self, ctx: StageContext) -> dict[str, Any]:
+    def _build_template_vars(self, ctx: ProcessorContext, entry: ProcessorEntry) -> dict[str, Any]:
         template_vars: dict[str, Any] = {
-            "sample_name": ctx.history.get("discover", type("", (), {"data": {}})()).data.get("filename", ctx.sample_path.name),
-            "sample_path": str(ctx.sample_path),
-            "history": {name: output.data for name, output in ctx.history.items()},
-            "config": ctx.config,
+            "sample_name": entry.upstream_data("discover", "filename", entry.source_path.name),
+            "sample_path": str(entry.source_path),
+            "history": {name: output.data for name, output in entry.history.items()},
+            "config": self.config,
         }
 
         # flatten history data for backward compatibility with existing templates
-        for output in ctx.history.values():
+        for output in entry.history.values():
             for k, v in output.data.items():
                 if k not in template_vars:
                     template_vars[k] = v
 
         # scan sample_dir for artifact files
-        for f in ctx.sample_dir.rglob("*"):
+        for f in entry.sample_dir.rglob("*"):
             if not f.is_file():
                 continue
-            rel = f.relative_to(ctx.sample_dir)
+            rel = f.relative_to(entry.sample_dir)
             key = str(rel).replace("\\", "/").replace("/", "_").replace(".", "_")
 
             if f.suffix == ".json":
@@ -117,7 +115,7 @@ class GenericLLM(MapTool):
             elif f.suffix in (".c", ".h", ".txt", ".md", ".py", ".yaml", ".yml"):
                 try:
                     content = f.read_text(encoding="utf-8", errors="replace")
-                    max_tokens = ctx.config.get("max_context_tokens", 900_000)
+                    max_tokens = self.config.get("max_context_tokens", 900_000)
                     char_budget = max_tokens * 4
                     if len(content) > char_budget:
                         content = content[:char_budget] + f"\n... [truncated: {len(content)} -> {char_budget} chars]"

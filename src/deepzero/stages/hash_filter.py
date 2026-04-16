@@ -3,11 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from deepzero.engine.stage import MapTool, StageContext, StageResult, StageSpec
+from deepzero.engine.stage import MapProcessor, ProcessorContext, ProcessorResult, ProcessorEntry, StageSpec
 
 
-class HashExclude(MapTool):
-    # generic hash-based exclusion filter - skips samples whose hash matches a known set
+class HashExclude(MapProcessor):
+    description = "hash-based exclusion filter — skips samples whose hash matches a known set"
 
     def __init__(self, spec: StageSpec):
         super().__init__(spec)
@@ -15,15 +15,13 @@ class HashExclude(MapTool):
         self._seen_hashes: set[str] = set()
 
     def setup(self, global_config: dict[str, Any]) -> None:
-        config = self.spec.config
-
         # inline hashes
-        inline = config.get("hashes", [])
+        inline = self.config.get("hashes", [])
         for h in inline:
             self._exclude_hashes.add(str(h).strip().lower())
 
         # hash file (one per line)
-        hash_file = config.get("hash_file", "")
+        hash_file = self.config.get("hash_file", "")
         if hash_file:
             path = Path(hash_file)
             if not path.is_absolute():
@@ -41,35 +39,25 @@ class HashExclude(MapTool):
         if self._exclude_hashes:
             self.log.info("excluding %d known hashes", len(self._exclude_hashes))
 
-    def process(self, ctx: StageContext) -> StageResult:
-        config = ctx.config
-        hash_field = config.get("hash_field", "sha256")
-        dedup = config.get("dedup", False)
+    def process(self, ctx: ProcessorContext, entry: ProcessorEntry) -> ProcessorResult:
+        hash_field = self.config.get("hash_field", "sha256")
+        dedup = self.config.get("dedup", False)
 
-        # find the hash in upstream history
         sample_hash = ""
-        for output in ctx.history.values():
+        for output in entry.history.values():
             if hash_field in output.data:
                 sample_hash = str(output.data[hash_field]).lower()
                 break
 
         if not sample_hash:
-            return StageResult(status="completed", verdict="continue")
+            return ProcessorResult.ok()
 
-        # dedup check
         if dedup:
             if sample_hash in self._seen_hashes:
-                return StageResult(
-                    status="completed", verdict="skip",
-                    data={"reject_reason": f"duplicate {hash_field}"},
-                )
+                return ProcessorResult.filter(f"duplicate {hash_field}")
             self._seen_hashes.add(sample_hash)
 
-        # exclusion check
         if sample_hash in self._exclude_hashes:
-            return StageResult(
-                status="completed", verdict="skip",
-                data={"reject_reason": "hash in exclusion list"},
-            )
+            return ProcessorResult.filter("hash in exclusion list")
 
-        return StageResult(status="completed", verdict="continue")
+        return ProcessorResult.ok()

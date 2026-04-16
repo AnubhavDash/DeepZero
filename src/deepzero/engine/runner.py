@@ -12,19 +12,20 @@ from pathlib import Path
 
 from deepzero.engine.context import generate_context
 from deepzero.engine.stage import (
-    BatchEntry,
-    BatchTool,
     FailurePolicy,
     GlobalConfig,
-    IngestTool,
+    IngestProcessor,
     LLMProtocol,
-    MapTool,
-    ReduceTool,
-    StageContext,
-    StageResult,
+    MapProcessor,
+    ReduceProcessor,
+    BulkMapProcessor,
+    ProcessorContext,
+    ProcessorResult,
     StageSpec,
-    Tool,
+    Processor,
+    ProcessorEntry,
 )
+from deepzero.engine.types import StageStatus, Verdict, SampleStatus, RunStatus
 from deepzero.engine.state import RunState, SampleState, StateStore
 
 log = logging.getLogger("deepzero.runner")
@@ -35,8 +36,8 @@ class PipelineRunner:
 
     def __init__(
         self,
-        ingest: IngestTool,
-        stages: list[tuple[StageSpec, Tool]],
+        ingest: IngestProcessor,
+        stages: list[tuple[StageSpec, Processor]],
         state_store: StateStore,
         pipeline_dir: Path,
         global_config: GlobalConfig,
@@ -66,7 +67,7 @@ class PipelineRunner:
             return self._execute_pipeline_stages(target, run_state)
         except KeyboardInterrupt:
             log.warning("interrupted by user - saving state")
-            run_state.status = "interrupted"
+            run_state.status = RunStatus.INTERRUPTED
             self.state_store.save_run(run_state)
             return run_state
         except (RuntimeError, ValueError, TypeError, OSError, AttributeError, LookupError, AssertionError) as e:
@@ -87,8 +88,8 @@ class PipelineRunner:
         log.info("--- setup --- initializing %d tools", len(stage_names))
 
         self.ingest.setup(self.global_config)
-        for _, tool in self.stages:
-            tool.setup(self.global_config)
+        for _, processor in self.stages:
+            processor.setup(self.global_config)
 
         log.info("--- setup complete ---")
         log.info("pipeline: %s", " -> ".join(stage_names))
@@ -104,7 +105,8 @@ class PipelineRunner:
         else:
             # fresh run - execute ingest
             log.info("--- %s (ingest) ---", self.ingest.spec.name)
-            samples = self.ingest.discover(target, self.ingest.spec.config, self.global_config)
+            ctx = ProcessorContext(pipeline_dir=self.pipeline_dir, global_config=self.global_config, llm=self.llm)
+            samples = self.ingest.process(ctx, target)
 
             run_state.stats["discovered"] = len(samples)
             run_state.stages = stage_names
@@ -124,21 +126,21 @@ class PipelineRunner:
                     sha256=sample.data.get("sha256", ""),
                     source_path=str(sample.source_path),
                     filename=sample.filename,
-                    verdict="active",
+                    verdict=SampleStatus.ACTIVE,
                 )
                 state.mark_stage_completed(
                     self.ingest.spec.name,
-                    verdict="continue",
+                    verdict=Verdict.CONTINUE,
                     data=sample.data,
                 )
-                state.verdict = "active"
+                state.verdict = SampleStatus.ACTIVE
                 sample_states[sample.sample_id] = state
                 self.state_store.save_sample(state)
 
             self.state_store.save_manifest(list(sample_states.values()))
 
         # breadth-first stage execution
-        for spec, tool in self.stages:
+        for spec, processor in self.stages:
             if self._shutdown_event.is_set():
                 log.warning("shutdown requested - stopping pipeline")
                 break
@@ -151,14 +153,14 @@ class PipelineRunner:
                 log.info("--- %s --- no active samples, skipping stage", spec.name)
                 continue
 
-            stage_stats = {"completed": 0, "skipped": 0, "failed": 0}
+            stage_stats = {"completed": 0, "filtered": 0, "failed": 0}
 
-            if isinstance(tool, ReduceTool):
-                self._run_reduce(tool, active, spec, stage_stats)
-            elif isinstance(tool, BatchTool):
-                self._run_batch(tool, active, spec, stage_stats)
+            if isinstance(processor, ReduceProcessor):
+                self._run_reduce(processor, active, spec, stage_stats)
+            elif isinstance(processor, BulkMapProcessor):
+                self._run_batch(processor, active, spec, stage_stats)
             else:
-                self._run_map(tool, active, spec, stage_stats)
+                self._run_map(processor, active, spec, stage_stats)
 
             # dumb limit - pure truncation, no sorting
             limit = spec.config.get("limit", 0)
@@ -170,7 +172,7 @@ class PipelineRunner:
                     for s in excess:
                         s.mark_stage_skipped(spec.name, "limit reached")
                         self.state_store.save_sample(s)
-                        stage_stats["skipped"] += 1
+                        stage_stats["filtered"] += 1
 
             # sync barrier
             self.state_store.save_manifest(list(sample_states.values()))
@@ -182,7 +184,7 @@ class PipelineRunner:
             self.state_store.save_run(run_state)
 
             passed = stage_stats["completed"]
-            filtered = stage_stats["skipped"]
+            filtered = stage_stats["filtered"]
             failed = stage_stats["failed"]
             log.info("--- %s -> %d passed, %d filtered, %d failed ---", spec.name, passed, filtered, failed)
 
@@ -195,7 +197,7 @@ class PipelineRunner:
 
     def _run_map(
         self,
-        tool: MapTool,
+        processor: MapProcessor,
         active: list[SampleState],
         spec: StageSpec,
         stage_stats: dict[str, int],
@@ -242,7 +244,7 @@ class PipelineRunner:
                     for idx, state in enumerate(pending):
                         if self._shutdown_event.is_set():
                             break
-                        self._process_one_map(state, spec, tool)
+                        self._process_one_map(state, spec, processor)
                         outcome = self._classify_outcome(state, spec.name)
                         stage_stats[outcome] += 1
                         progress.advance(task)
@@ -250,7 +252,7 @@ class PipelineRunner:
                     max_workers = min(parallelism, len(pending))
                     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                         future_map = {
-                            executor.submit(self._process_one_map, s, spec, tool): s
+                            executor.submit(self._process_one_map, s, spec, processor): s
                             for s in pending
                         }
                         for future in concurrent.futures.as_completed(future_map):
@@ -274,24 +276,27 @@ class PipelineRunner:
         self,
         state: SampleState,
         spec: StageSpec,
-        tool: MapTool,
+        processor: MapProcessor,
     ) -> None:
         sample_dir = self.state_store.sample_dir(state.sample_id)
         source_path = Path(state.source_path)
 
-        ctx = StageContext(
-            sample_path=source_path,
-            sample_dir=sample_dir,
-            history=dict(state.history),
-            config=spec.config,
+        ctx = ProcessorContext(
             pipeline_dir=self.pipeline_dir,
             global_config=self.global_config,
             llm=self.llm,
-            log=logging.getLogger(f"deepzero.tool.{spec.name}"),
+            log=logging.getLogger(f"deepzero.processor.{spec.name}"),
+        )
+        entry = ProcessorEntry(
+            sample_id=state.sample_id,
+            source_path=source_path,
+            filename=state.filename,
+            sample_dir=sample_dir,
+            _store=self.state_store,
         )
 
         # optional skip hook (e.g. cached decompilation)
-        skip_reason = tool.should_skip(ctx)
+        skip_reason = processor.should_skip(ctx, entry)
         if skip_reason:
             state.mark_stage_skipped(spec.name, skip_reason)
             self.state_store.save_sample(state)
@@ -306,9 +311,9 @@ class PipelineRunner:
         while attempts < max_attempts:
             attempts += 1
             try:
-                result = self._execute_with_timeout(tool, ctx, spec.timeout)
+                result = self._execute_with_timeout(processor, ctx, entry, spec.timeout)
 
-                if result.status == "completed":
+                if result.status == StageStatus.COMPLETED:
                     state.mark_stage_completed(
                         spec.name,
                         verdict=result.verdict,
@@ -328,7 +333,8 @@ class PipelineRunner:
                     time.sleep(backoff)
                     continue
 
-                state.mark_stage_failed(spec.name, result.error or "tool returned failed status")
+                state.mark_stage_failed(spec.name, result.error or "processor returned failed status")
+                log.error("[%s] %s failed: %s", spec.name, state.filename, result.error)
                 self.state_store.save_sample(state)
 
                 if spec.on_failure == FailurePolicy.ABORT:
@@ -373,35 +379,46 @@ class PipelineRunner:
 
     def _run_reduce(
         self,
-        tool: ReduceTool,
+        processor: ReduceProcessor,
         active: list[SampleState],
         spec: StageSpec,
         stage_stats: dict[str, int],
     ) -> None:
         log.info("  reduce: %d active samples -> %s", len(active), spec.name)
-
+        ctx = ProcessorContext(pipeline_dir=self.pipeline_dir, global_config=self.global_config, llm=self.llm)
+        entries = []
+        for state in active:
+            entries.append(ProcessorEntry(
+                sample_id=state.sample_id,
+                source_path=Path(state.source_path),
+                filename=state.filename,
+                sample_dir=self.state_store.sample_dir(state.sample_id),
+                _store=self.state_store
+            ))
         try:
-            results = tool.reduce(active, spec.config)
+            results = processor.process(ctx, entries)
         except (RuntimeError, ValueError, TypeError, OSError, AttributeError, LookupError, AssertionError) as exc:
-            log.error("  reduce tool '%s' crashed: %s", spec.name, exc)
-            # don't kill the pipeline - just log and continue with samples unchanged
+            log.error("  reduce processor '%s' crashed: %s", spec.name, exc)
             return
 
-        for state in results:
-            # record the reduce stage in history
-            if not state.is_stage_done(spec.name):
-                if state.is_active():
-                    state.mark_stage_completed(spec.name, verdict="continue")
+        kept_ids = set(results)
+        for state in active:
+            if state.sample_id in kept_ids:
+                if not state.is_stage_done(spec.name):
+                    state.mark_stage_completed(spec.name, verdict=Verdict.CONTINUE)
                     stage_stats["completed"] += 1
-                else:
-                    stage_stats["skipped"] += 1
+            else:
+                if not state.is_stage_done(spec.name):
+                    state.verdict = SampleStatus.FILTERED
+                    state.mark_stage_skipped(spec.name, "filtered by reduce")
+                    stage_stats["filtered"] += 1
             self.state_store.save_sample(state)
 
     # -- batch execution --
 
     def _run_batch(
         self,
-        tool: BatchTool,
+        processor: BulkMapProcessor,
         active: list[SampleState],
         spec: StageSpec,
         stage_stats: dict[str, int],
@@ -419,21 +436,23 @@ class PipelineRunner:
         entries = []
         for state in pending:
             sample_dir = self.state_store.sample_dir(state.sample_id)
-            entries.append(BatchEntry(
+            entries.append(ProcessorEntry(
                 sample_id=state.sample_id,
-                sample_dir=sample_dir,
                 source_path=Path(state.source_path),
-                history=dict(state.history),
+                filename=state.filename,
+                sample_dir=sample_dir,
+                _store=self.state_store
             ))
 
         log.info("  batch: processing %d samples with %s", len(entries), spec.name)
 
         try:
-            results = tool.execute_batch(entries, spec.config)
+            ctx = ProcessorContext(pipeline_dir=self.pipeline_dir, global_config=self.global_config, llm=self.llm)
+            results = processor.process(ctx, entries)
         except (RuntimeError, ValueError, TypeError, OSError, AttributeError, LookupError, AssertionError) as exc:
-            log.error("  batch tool '%s' crashed: %s", spec.name, exc)
+            log.error("  batch processor '%s' crashed: %s", spec.name, exc)
             for state in pending:
-                state.mark_stage_failed(spec.name, f"batch tool crashed: {exc}")
+                state.mark_stage_failed(spec.name, f"batch processor crashed: {exc}")
                 self.state_store.save_sample(state)
                 stage_stats["failed"] += 1
             return
@@ -442,7 +461,7 @@ class PipelineRunner:
         for i, state in enumerate(pending):
             if i < len(results):
                 result = results[i]
-                if result.status == "completed":
+                if result.status == StageStatus.COMPLETED:
                     state.mark_stage_completed(
                         spec.name,
                         verdict=result.verdict,
@@ -452,7 +471,7 @@ class PipelineRunner:
                 else:
                     state.mark_stage_failed(spec.name, result.error or "batch item failed")
             else:
-                state.mark_stage_failed(spec.name, "batch tool returned fewer results than entries")
+                state.mark_stage_failed(spec.name, "batch processor returned fewer results than entries")
 
             self.state_store.save_sample(state)
             outcome = self._classify_outcome(state, spec.name)
@@ -464,22 +483,22 @@ class PipelineRunner:
         output = state.history.get(stage_name)
         if output is None:
             return "failed"
-        if output.status == "completed" and output.verdict == "skip":
-            return "skipped"
-        if output.status in ("skipped", "failed"):
-            return output.status
+        if output.status == StageStatus.COMPLETED and output.verdict == Verdict.FILTER:
+            return "filtered"
+        if output.status in (StageStatus.FILTERED, StageStatus.FAILED):
+            return output.status.value
         return "completed"
 
-    def _execute_with_timeout(self, tool: MapTool, ctx: StageContext, timeout: int) -> StageResult:
+    def _execute_with_timeout(self, processor: MapProcessor, ctx: ProcessorContext, entry: ProcessorEntry, timeout: int) -> ProcessorResult:
         if timeout <= 0:
-            return tool.process(ctx)
+            return processor.process(ctx, entry)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(tool.process, ctx)
+            future = executor.submit(processor.process, ctx, entry)
             try:
                 return future.result(timeout=timeout)
             except concurrent.futures.TimeoutError:
-                raise TimeoutError(f"tool timed out after {timeout}s")
+                raise TimeoutError(f"processor timed out after {timeout}s")
 
     def _generate_context_files(self, sample_states: dict[str, SampleState]) -> None:
         for sid, state in sample_states.items():
@@ -495,19 +514,19 @@ class PipelineRunner:
 
     def _teardown_tools(self) -> None:
         errors: list[str] = []
-        for _, tool in self.stages:
+        for _, processor in self.stages:
             try:
-                tool.teardown()
+                processor.teardown()
             except (RuntimeError, ValueError, OSError, AttributeError) as e:
-                errors.append(f"{tool.spec.name}: {e}")
-                log.warning("tool '%s' teardown error: %s", tool.spec.name, e)
+                errors.append(f"{processor.name}: {e}")
+                log.warning("processor '%s' teardown error: %s", processor.name, e)
         try:
             self.ingest.teardown()
         except (RuntimeError, ValueError, OSError, AttributeError) as e:
             errors.append(f"ingest: {e}")
-            log.warning("ingest tool teardown error: %s", e)
+            log.warning("ingest processor teardown error: %s", e)
         if errors:
-            log.warning("%d tool(s) failed teardown", len(errors))
+            log.warning("%d processor(s) failed teardown", len(errors))
 
     def _install_signal_handler(self) -> None:
         try:

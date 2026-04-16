@@ -4,54 +4,43 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from deepzero.engine.stage import IngestTool, Sample
+from deepzero.engine.stage import IngestProcessor, Sample, ProcessorContext
 
 
-class PEIngest(IngestTool):
-    """discovers portable executable files and extracts PE metadata.
-    walks the target directory, parses PE headers, extracts import tables,
-    and computes metadata used by downstream filter/analysis tools.
+class PEIngest(IngestProcessor):
+    description = "discovers portable executable files, parses PE headers, and extracts driver metadata"
+    version = "2.0"
 
-    not tied to any specific corpus layout - works with any directory of PE files.
-
-    config:
-      extensions: list of file extensions to scan (default [".sys"])
-      recursive: whether to recurse (default true)
-      subdirs: optional list of subdirectory name patterns to restrict scanning.
-               useful for large corpus layouts where only certain dirs matter.
-      subsystem_filter: only accept these PE subsystem values (e.g. [1] for native/kernel)
-    """
-
-    def discover(self, target: Path, config: dict[str, Any], global_config: dict[str, Any]) -> list[Sample]:
-        extensions = config.get("extensions", [".sys"])
-        recursive = config.get("recursive", True)
-        subdirs = config.get("subdirs", [])
+    def process(self, ctx: ProcessorContext, target: Path) -> list[Sample]:
+        extensions = self.config.get("extensions", [".sys"])
+        recursive = self.config.get("recursive", True)
+        subdirs = self.config.get("subdirs", [])
 
         if target.is_file():
-            return self._ingest_single(target, config)
+            return self._ingest_single(target)
 
         if not target.is_dir():
             self.log.error("target does not exist: %s", target)
             return []
 
         if subdirs:
-            return self._ingest_filtered(target, subdirs, extensions, config)
+            return self._ingest_filtered(target, subdirs, extensions)
 
-        return self._ingest_directory(target, extensions, recursive, config)
+        return self._ingest_directory(target, extensions, recursive)
 
-    def _ingest_single(self, path: Path, config: dict[str, Any]) -> list[Sample]:
+    def _ingest_single(self, path: Path) -> list[Sample]:
         self.log.info("single file mode: %s", path.name)
-        data = self._extract_metadata(path, config)
+        data = self._extract_metadata(path)
         sample_id = data.get("sha256", "")[:16] or path.stem
         return [Sample(sample_id=sample_id, source_path=path, filename=path.name, data=data)]
 
-    def _ingest_filtered(self, root: Path, subdirs: list[str], extensions: list[str], config: dict[str, Any]) -> list[Sample]:
+    def _ingest_filtered(self, root: Path, subdirs: list[str], extensions: list[str]) -> list[Sample]:
         all_dirs = sorted(d for d in root.iterdir() if d.is_dir())
         matching = [d for d in all_dirs if any(p.lower() in d.name.lower() for p in subdirs)]
 
         if not matching:
             self.log.warning("no subdirectories matched patterns %s in %s", subdirs, root)
-            return self._ingest_directory(root, extensions, True, config)
+            return self._ingest_directory(root, extensions, True)
 
         self.log.info("scanning %d/%d matching subdirectories", len(matching), len(all_dirs))
 
@@ -63,9 +52,9 @@ class PEIngest(IngestTool):
 
         files = sorted(set(files))
         self.log.info("found %d files across %d directories", len(files), len(matching))
-        return self._analyze_files(files, config)
+        return self._analyze_files(files)
 
-    def _ingest_directory(self, directory: Path, extensions: list[str], recursive: bool, config: dict[str, Any]) -> list[Sample]:
+    def _ingest_directory(self, directory: Path, extensions: list[str], recursive: bool) -> list[Sample]:
         files: list[Path] = []
         for ext in extensions:
             ext = ext if ext.startswith(".") else f".{ext}"
@@ -76,17 +65,17 @@ class PEIngest(IngestTool):
 
         files = sorted(set(files))
         self.log.info("found %d files in %s", len(files), directory)
-        return self._analyze_files(files, config)
+        return self._analyze_files(files)
 
-    def _analyze_files(self, files: list[Path], config: dict[str, Any]) -> list[Sample]:
+    def _analyze_files(self, files: list[Path]) -> list[Sample]:
         import time
         samples = []
         total = len(files)
-        limit = config.get("limit", 0)
+        limit = self.config.get("limit", 0)
         start = time.monotonic()
 
         for i, f in enumerate(files):
-            data = self._extract_metadata(f, config)
+            data = self._extract_metadata(f)
             sample_id = data.get("sha256", "")[:16] or f.stem
             samples.append(Sample(sample_id=sample_id, source_path=f, filename=f.name, data=data))
 
@@ -95,7 +84,6 @@ class PEIngest(IngestTool):
                 rate = (i + 1) / elapsed if elapsed > 0 else 0
                 self.log.info("pe analysis: %d/%d (%.0f files/s, %.0fs elapsed)", i + 1, total, rate, elapsed)
 
-            # stop early if we have enough samples and a limit was set
             if limit > 0 and len(samples) >= limit:
                 self.log.info("reached limit of %d samples, stopping early (%d/%d files scanned)", limit, i + 1, total)
                 break
@@ -103,7 +91,7 @@ class PEIngest(IngestTool):
         self.log.info("ingest complete: %d samples in %.1fs", len(samples), time.monotonic() - start)
         return samples
 
-    def _extract_metadata(self, path: Path, config: dict[str, Any]) -> dict[str, Any]:
+    def _extract_metadata(self, path: Path) -> dict[str, Any]:
         try:
             data = path.read_bytes()
         except OSError as e:
@@ -113,7 +101,7 @@ class PEIngest(IngestTool):
         md5 = hashlib.md5(data, usedforsecurity=False).hexdigest()  # noqa: S324
         meta: dict[str, Any] = {"sha256": sha256, "md5": md5, "size_bytes": len(data)}
 
-        subsystem_filter = config.get("subsystem_filter", [])
+        subsystem_filter = self.config.get("subsystem_filter", [])
         if data[:2] == b"MZ":
             meta.update(self._parse_pe(data, subsystem_filter))
 
@@ -202,7 +190,6 @@ class PEIngest(IngestTool):
         except (IndexError, AttributeError):
             meta["is_signed"] = False
 
-        # priority scoring based on dangerous API surface
         score = 0.0
         if meta["has_ioctl_surface"]:
             phys_mem = {"MmMapIoSpace", "ZwMapViewOfSection", "ZwOpenSection", "MmGetPhysicalAddress"}

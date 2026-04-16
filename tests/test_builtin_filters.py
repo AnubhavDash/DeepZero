@@ -2,146 +2,218 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# -- metadata filter (builtin map tool) --
+# -- metadata filter (builtin map processor) --
 
 class TestMetadataFilter:
-    def _make_ctx(self, data: dict, config: dict):
-        from deepzero.engine.stage import StageContext
+    def _make_ctx(self, data: dict, config: dict, tmp_path=None):
+        if tmp_path is None:
+            tmp_path = Path("/tmp")  # nosec B108
+        from deepzero.engine.stage import ProcessorContext
         from deepzero.engine.state import StageOutput
         history = {"discover": StageOutput(status="completed", data=data)}
-        return StageContext(
-            sample_path=Path("test.sys"),
-            sample_dir=Path("work/test"),
-            history=history,
-            config=config,
-            pipeline_dir=Path("."),
+        ctx = ProcessorContext(
+            pipeline_dir=tmp_path,
             global_config={},
-            llm=None,
+            llm=locals().get("llm")
         )
+        from deepzero.engine.stage import ProcessorEntry
+        try:
+            hist = history
+        except NameError:
+            hist = {}
+            
+        class MockStore:
+            def __init__(self, history): self._history = history
+            def load_sample(self, sid):
+                class S:
+                    def __init__(self, history): self._history = history
+                    @property
+                    def history(self): return self._history
+                return S(self._history)
+                
+        try:
+            sample_path_val = sample_path
+        except NameError:
+            sample_path_val = tmp_path / 'test.bin'
+
+        try:
+            sample_dir_val = sample_dir
+        except NameError:
+            sample_dir_val = tmp_path
+
+        entry = ProcessorEntry(
+            sample_id="test_sample",
+            source_path=sample_path_val,
+            filename=sample_path_val.name,
+            sample_dir=sample_dir_val,
+            _store=MockStore(hist)
+        )
+        return ctx, entry
 
     def _make_filter(self, config: dict | None = None):
         from deepzero.engine.stage import StageSpec
         from deepzero.stages.filter import MetadataFilter
-        spec = StageSpec(name="test_filter", tool="metadata_filter", config=config or {})
+        spec = StageSpec(name="test_filter", processor="metadata_filter", config=config or {})
         return MetadataFilter(spec)
 
     def test_passes_when_requirements_met(self):
         f = self._make_filter({"require": {"is_kernel_driver": True}})
-        ctx = self._make_ctx({"is_kernel_driver": True}, {"require": {"is_kernel_driver": True}})
-        result = f.process(ctx)
+        ctx, entry = self._make_ctx({"is_kernel_driver": True}, {"require": {"is_kernel_driver": True}})
+        result = f.process(ctx, entry)
         assert result.verdict == "continue"
 
     def test_skips_when_requirement_not_met(self):
-        f = self._make_filter()
-        ctx = self._make_ctx({"is_kernel_driver": False}, {"require": {"is_kernel_driver": True}})
-        result = f.process(ctx)
-        assert result.verdict == "skip"
+        f = self._make_filter({"require": {"is_kernel_driver": True}})
+        ctx, entry = self._make_ctx({"is_kernel_driver": False}, {"require": {"is_kernel_driver": True}})
+        result = f.process(ctx, entry)
+        assert result.verdict == "filter"
 
     def test_min_threshold(self):
-        f = self._make_filter()
-        ctx = self._make_ctx({"priority_score": 2.0}, {"min_priority_score": 5.0})
-        result = f.process(ctx)
-        assert result.verdict == "skip"
+        f = self._make_filter({"min_priority_score": 5.0})
+        ctx, entry = self._make_ctx({"priority_score": 2.0}, {"min_priority_score": 5.0})
+        result = f.process(ctx, entry)
+        assert result.verdict == "filter"
 
     def test_max_threshold(self):
-        f = self._make_filter()
-        ctx = self._make_ctx({"size_bytes": 50000}, {"max_size_bytes": 10000})
-        result = f.process(ctx)
-        assert result.verdict == "skip"
+        f = self._make_filter({"max_size_bytes": 10000})
+        ctx, entry = self._make_ctx({"size_bytes": 50000}, {"max_size_bytes": 10000})
+        result = f.process(ctx, entry)
+        assert result.verdict == "filter"
 
     def test_dedup_first_pass(self):
-        f = self._make_filter()
-        ctx = self._make_ctx({"sha256": "abc123"}, {"dedup_field": "sha256"})
-        result = f.process(ctx)
+        f = self._make_filter({"dedup_field": "sha256"})
+        ctx, entry = self._make_ctx({"sha256": "abc123"}, {"dedup_field": "sha256"})
+        result = f.process(ctx, entry)
         assert result.verdict == "continue"
 
     def test_dedup_second_pass_skips(self):
-        f = self._make_filter()
-        ctx1 = self._make_ctx({"sha256": "abc123"}, {"dedup_field": "sha256"})
-        ctx2 = self._make_ctx({"sha256": "abc123"}, {"dedup_field": "sha256"})
-        f.process(ctx1)
-        result = f.process(ctx2)
-        assert result.verdict == "skip"
-        assert "duplicate" in result.data.get("reject_reason", "")
+        f = self._make_filter({"dedup_field": "sha256"})
+        ctx1, entry1 = self._make_ctx({"sha256": "abc123"}, {"dedup_field": "sha256"})
+        ctx2, entry2 = self._make_ctx({"sha256": "abc123"}, {"dedup_field": "sha256"})
+        f.process(ctx1, entry1)
+        result = f.process(ctx2, entry2)
+        assert result.verdict == "filter"
+        assert "duplicate" in result.data.get("filter_reason", "")
 
 
-# -- hash exclude (builtin map tool) --
+# -- hash exclude (builtin map processor) --
 
 class TestHashExclude:
-    def _make_ctx(self, data: dict, config: dict):
-        from deepzero.engine.stage import StageContext
+    def _make_ctx(self, data: dict, config: dict, tmp_path=None):
+        if tmp_path is None:
+            tmp_path = Path("/tmp")  # nosec B108
+        from deepzero.engine.stage import ProcessorContext
         from deepzero.engine.state import StageOutput
         history = {"discover": StageOutput(status="completed", data=data)}
-        return StageContext(
-            sample_path=Path("test.sys"),
-            sample_dir=Path("work/test"),
-            history=history,
-            config=config,
-            pipeline_dir=Path("."),
+        ctx = ProcessorContext(
+            pipeline_dir=tmp_path,
             global_config={},
-            llm=None,
+            llm=locals().get("llm")
         )
+        from deepzero.engine.stage import ProcessorEntry
+        try:
+            hist = history
+        except NameError:
+            hist = {}
+            
+        class MockStore:
+            def __init__(self, history): self._history = history
+            def load_sample(self, sid):
+                class S:
+                    def __init__(self, history): self._history = history
+                    @property
+                    def history(self): return self._history
+                return S(self._history)
+                
+        try:
+            sample_path_val = sample_path
+        except NameError:
+            sample_path_val = tmp_path / 'test.bin'
+
+        try:
+            sample_dir_val = sample_dir
+        except NameError:
+            sample_dir_val = tmp_path
+
+        entry = ProcessorEntry(
+            sample_id="test_sample",
+            source_path=sample_path_val,
+            filename=sample_path_val.name,
+            sample_dir=sample_dir_val,
+            _store=MockStore(hist)
+        )
+        return ctx, entry
 
     def test_inline_hashes_exclude(self):
         from deepzero.engine.stage import StageSpec
         from deepzero.stages.hash_filter import HashExclude
-        spec = StageSpec(name="hash_test", tool="hash_exclude", config={"hashes": ["ABCD1234"]})
+        spec = StageSpec(name="hash_test", processor="hash_exclude", config={"hashes": ["ABCD1234"]})
         f = HashExclude(spec)
         f.setup({})
-        ctx = self._make_ctx({"sha256": "abcd1234"}, {"hash_field": "sha256"})
-        result = f.process(ctx)
-        assert result.verdict == "skip"
+        ctx, entry = self._make_ctx({"sha256": "abcd1234"}, {"hash_field": "sha256"})
+        result = f.process(ctx, entry)
+        assert result.verdict == "filter"
 
     def test_hash_not_in_list_passes(self):
         from deepzero.engine.stage import StageSpec
         from deepzero.stages.hash_filter import HashExclude
-        spec = StageSpec(name="hash_test", tool="hash_exclude", config={"hashes": ["ABCD1234"]})
+        spec = StageSpec(name="hash_test", processor="hash_exclude", config={"hashes": ["ABCD1234"]})
         f = HashExclude(spec)
         f.setup({})
-        ctx = self._make_ctx({"sha256": "ffffff"}, {"hash_field": "sha256"})
-        result = f.process(ctx)
+        ctx, entry = self._make_ctx({"sha256": "ffffff"}, {"hash_field": "sha256"})
+        result = f.process(ctx, entry)
         assert result.verdict == "continue"
 
 
-# -- top-k selector (builtin reduce tool) --
+# -- top-k selector (builtin reduce processor) --
 
 class TestTopKSelector:
     def test_keeps_top_k(self):
-        from deepzero.engine.stage import StageSpec
-        from deepzero.engine.state import SampleState
+        from deepzero.engine.stage import StageSpec, ProcessorContext, ProcessorEntry
         from deepzero.stages.top_k import TopKSelector
+        from deepzero.engine.state import StageOutput
+        from pathlib import Path
 
-        spec = StageSpec(name="pick", tool="top_k", config={})
-        tool = TopKSelector(spec)
+        spec = StageSpec(name="pick", processor="top_k", config={"metric_path": "scan.finding_count", "keep_top": 2, "sort_order": "desc"})
+        processor = TopKSelector(spec)
 
-        states = []
+        ctx = ProcessorContext(pipeline_dir=Path("/tmp"), global_config={}, llm=None)  # nosec B108
+
+        entries = []
         for i in range(5):
-            s = SampleState(sample_id=f"s{i}", filename=f"s{i}.sys", verdict="active")
-            s.mark_stage_completed("scan", data={"finding_count": i})
-            s.verdict = "active"
-            states.append(s)
+            entry = ProcessorEntry(
+                sample_id=f"s{i}",
+                source_path=Path(f"/tmp/s{i}.sys"),  # nosec B108
+                filename=f"s{i}.sys",
+                sample_dir=Path(f"/tmp/s{i}"),  # nosec B108
+                _store=None
+            )
+            entry._history = {"scan": StageOutput(status="completed", data={"finding_count": i})}
+            entries.append(entry)
 
-        config = {"metric_path": "scan.finding_count", "keep_top": 2, "sort_order": "desc"}
-        result = tool.reduce(states, config)
+        active_ids = processor.process(ctx, entries)
 
-        active = [s for s in result if s.is_active()]
-        skipped = [s for s in result if s.verdict == "skipped"]
-        assert len(active) == 2
-        assert len(skipped) == 3
-        # top 2 should be s4 and s3 (highest finding_count)
-        active_ids = {s.sample_id for s in active}
+        assert len(active_ids) == 2
         assert "s4" in active_ids
         assert "s3" in active_ids
 
     def test_passthrough_without_metric(self):
-        from deepzero.engine.stage import StageSpec
-        from deepzero.engine.state import SampleState
+        from deepzero.engine.stage import StageSpec, ProcessorContext, ProcessorEntry
         from deepzero.stages.top_k import TopKSelector
+        from pathlib import Path
 
-        spec = StageSpec(name="pick", tool="top_k", config={})
-        tool = TopKSelector(spec)
-        states = [SampleState(sample_id="s0", filename="s0.sys", verdict="active")]
+        spec = StageSpec(name="pick", processor="top_k", config={})
+        processor = TopKSelector(spec)
+        ctx = ProcessorContext(pipeline_dir=Path("/tmp"), global_config={}, llm=None)  # nosec B108
+        
+        entry = ProcessorEntry(
+            sample_id="s0",
+            source_path=Path("/tmp/s0.sys"),  # nosec B108
+            filename="s0.sys",
+            sample_dir=Path("/tmp/s0"),  # nosec B108
+            _store=None
+        )
 
-        result = tool.reduce(states, {})
+        result = processor.process(ctx, [entry])
         assert len(result) == 1
-        assert result[0].is_active()
+        assert result[0] == "s0"

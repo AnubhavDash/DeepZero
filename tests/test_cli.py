@@ -26,7 +26,7 @@ class TestValidateCommand:
         yaml_content = """name: test
 stages:
   - name: discover
-    tool: pe_ingest
+    processor: pe_ingest
 """
         pipeline_yaml = tmp_path / "pipeline.yaml"
         pipeline_yaml.write_text(yaml_content)
@@ -39,7 +39,7 @@ stages:
 class TestListToolsCommand:
     def test_list_tools_shows_table(self):
         runner = CliRunner()
-        result = runner.invoke(main, ["list-tools"])
+        result = runner.invoke(main, ["list-processors"])
         assert result.exit_code == 0
         # should show registered tools header
         assert "registered tools" in result.output.lower() or "name" in result.output.lower()

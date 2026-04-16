@@ -2,29 +2,27 @@ from __future__ import annotations
 
 from typing import Any
 
-from deepzero.engine.stage import MapTool, StageContext, StageResult, StageSpec
+from deepzero.engine.stage import MapProcessor, ProcessorContext, ProcessorResult, StageSpec, ProcessorEntry
 
 
-class MetadataFilter(MapTool):
-    # generic metadata condition evaluator - checks field equality, min/max thresholds, dedup
+class MetadataFilter(MapProcessor):
+    description = "generic metadata condition evaluator — checks field equality, min/max thresholds, dedup"
 
     def __init__(self, spec: StageSpec):
         super().__init__(spec)
         self._seen: set[str] = set()
 
-    def process(self, ctx: StageContext) -> StageResult:
-        config = ctx.config
+    def process(self, ctx: ProcessorContext, entry: ProcessorEntry) -> ProcessorResult:
+        config = self.config
 
-        # gather all upstream data into a flat view for condition checks
-        flat = self._flatten_history(ctx)
+        flat = self._flatten_history(entry)
 
         # field requirements
         require = config.get("require", {})
         for field_name, expected_value in require.items():
             actual = flat.get(field_name)
             if actual != expected_value:
-                reason = f"filter: {field_name}={actual}, required {expected_value}"
-                return StageResult(status="completed", verdict="skip", data={"reject_reason": reason})
+                return ProcessorResult.filter(f"{field_name}={actual}, required {expected_value}")
 
         # min thresholds
         for key, value in config.items():
@@ -32,8 +30,7 @@ class MetadataFilter(MapTool):
                 field_name = key[4:]
                 actual = flat.get(field_name, 0)
                 if isinstance(actual, (int, float)) and actual < value:
-                    reason = f"filter: {field_name}={actual} < min {value}"
-                    return StageResult(status="completed", verdict="skip", data={"reject_reason": reason})
+                    return ProcessorResult.filter(f"{field_name}={actual} < min {value}")
 
         # max thresholds
         for key, value in config.items():
@@ -41,8 +38,7 @@ class MetadataFilter(MapTool):
                 field_name = key[4:]
                 actual = flat.get(field_name, 0)
                 if isinstance(actual, (int, float)) and actual > value:
-                    reason = f"filter: {field_name}={actual} > max {value}"
-                    return StageResult(status="completed", verdict="skip", data={"reject_reason": reason})
+                    return ProcessorResult.filter(f"{field_name}={actual} > max {value}")
 
         # dedup on a data field
         dedup_field = config.get("dedup_field", "")
@@ -50,19 +46,14 @@ class MetadataFilter(MapTool):
             dedup_value = flat.get(dedup_field, "")
             if dedup_value:
                 if dedup_value in self._seen:
-                    return StageResult(
-                        status="completed",
-                        verdict="skip",
-                        data={"reject_reason": f"duplicate {dedup_field}"},
-                    )
+                    return ProcessorResult.filter(f"duplicate {dedup_field}")
                 self._seen.add(dedup_value)
 
-        return StageResult(status="completed", verdict="continue")
+        return ProcessorResult.ok()
 
-    def _flatten_history(self, ctx: StageContext) -> dict[str, Any]:
-        # merge all upstream stage data into one flat dict for backward-compatible lookups
-        # later stages overwrite earlier ones if keys collide - this is intentional
+    def _flatten_history(self, entry: ProcessorEntry) -> dict[str, Any]:
+        # merge all upstream processor data into one flat dict
         flat: dict[str, Any] = {}
-        for output in ctx.history.values():
+        for output in entry.history.values():
             flat.update(output.data)
         return flat

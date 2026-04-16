@@ -30,8 +30,8 @@ class _ShortNameFormatter(logging.Formatter):
         name = record.name
         short = _LOG_PREFIX_MAP.get(name)
         if short is None:
-            if name.startswith("deepzero.tool."):
-                short = name[len("deepzero.tool."):]
+            if name.startswith("deepzero.processor."):
+                short = name[len("deepzero.processor."):]
             elif name.startswith("deepzero."):
                 short = name[len("deepzero."):]
             else:
@@ -70,14 +70,14 @@ def _build_runner(pipeline_def: Any) -> tuple[Any, Any]:
     # shared setup for run/resume - builds PipelineRunner and optional LLM provider
     from deepzero.engine.runner import PipelineRunner
     from deepzero.engine.state import StateStore
-    from deepzero.providers.llm import LLMProvider
+    from deepzero.engine.llm import LLMProvider
 
     llm = LLMProvider(pipeline_def.model) if pipeline_def.model else None
 
     state_store = StateStore(pipeline_def.work_dir)
 
     runner = PipelineRunner(
-        ingest=pipeline_def.ingest_tool,
+        ingest=pipeline_def.ingest_processor,
         stages=pipeline_def.stages,
         state_store=state_store,
         pipeline_dir=pipeline_def.pipeline_dir,
@@ -144,7 +144,6 @@ def run(target: str, pipeline: str, model: str | None, work_dir: str | None, ver
 
     run_state = runner.run(target_path, run_state)
 
-    # print summary
     console.print()
     if run_state.status == "completed":
         console.print("[bold green]pipeline completed[/]")
@@ -153,11 +152,9 @@ def run(target: str, pipeline: str, model: str | None, work_dir: str | None, ver
     else:
         console.print(f"[bold red]pipeline failed: {run_state.stats.get('error', 'unknown')}[/]")
 
-    _print_stats(run_state)
-
 
 @main.command()
-@click.option("--pipeline", "-p", required=True, help="pipeline name or path (for tool resolution)")
+@click.option("--pipeline", "-p", required=True, help="pipeline name or path (for processor resolution)")
 @click.option("--model", "-m", default=None, help="llm model override (e.g. openai/gpt-4o)")
 @click.option("--verbose", "-v", is_flag=True, help="verbose logging")
 def resume(pipeline: str, model: str | None, verbose: bool):
@@ -185,7 +182,6 @@ def resume(pipeline: str, model: str | None, verbose: bool):
 
     console.print(f"[bold cyan]resuming[/] pipeline '{run_state.pipeline}' (run {run_state.run_id})")
     console.print(f"  status: {run_state.status}")
-    _print_stats(run_state)
 
     runner, _ = _build_runner(pipeline_def)
 
@@ -197,7 +193,6 @@ def resume(pipeline: str, model: str | None, verbose: bool):
         console.print("[bold green]pipeline completed[/]")
     else:
         console.print(f"[bold yellow]pipeline status: {run_state.status}[/]")
-    _print_stats(run_state)
 
 
 @main.command()
@@ -274,22 +269,22 @@ def validate(pipeline_ref: str):
             console.print(f"  [yellow]![/] {w}")
 
 
-@main.command("list-tools")
-def list_tools():
-    """list all registered tool types"""
+@main.command("list-processors")
+def list_processors():
+    """list all registered processor types"""
     import deepzero.stages  # noqa: F401
-    from deepzero.engine.stage import get_registered_tools
+    from deepzero.engine.stage import get_registered_processors
 
-    tools = get_registered_tools()
+    processors = get_registered_processors()
 
-    table = Table(title="registered tools")
+    table = Table(title="registered processors")
     table.add_column("name", style="cyan")
     table.add_column("type", style="green")
     table.add_column("class", style="dim")
 
-    for name, cls in sorted(tools.items()):
-        tool_type = getattr(cls, "tool_type", "unknown")
-        table.add_row(name, str(tool_type.value if hasattr(tool_type, "value") else tool_type), f"{cls.__module__}.{cls.__name__}")
+    for name, cls in sorted(processors.items()):
+        ptype = getattr(cls, "processor_type", "unknown")
+        table.add_row(name, str(ptype.value if hasattr(ptype, "value") else ptype), f"{cls.__module__}.{cls.__name__}")
 
     console.print(table)
 
@@ -317,14 +312,14 @@ settings:
 
 stages:
   - name: discover
-    tool: file_discovery
+    processor: file_discovery
     config:
       extensions: ["*"]
       recursive: true
 
   # add your stages here
-  # bare name = built-in tool, path/with/slash = project tool in tools/ dir
-  # tool types: map (1:1), reduce (N:1 ranking), batch (N:batch external)
+  # bare name = built-in processor, path/with/slash = external processor in processors/ dir
+  # processor types: map (1:1), reduce (N:1 ranking), batch (N:batch external)
 """
 
     target_path_yaml = pipeline_dir / "pipeline.yaml"
@@ -356,7 +351,7 @@ def interactive(model: str, work_dir: str, verbose: bool):
 
     _load_env()
 
-    from deepzero.providers.llm import LLMProvider
+    from deepzero.engine.llm import LLMProvider
     from deepzero.engine.state import StateStore
 
     console.print(f"[bold cyan]deepzero interactive[/] - model: {model}")
@@ -447,14 +442,14 @@ def _print_stats(run_state) -> None:
     table = Table(show_header=True)
     table.add_column("stage", style="cyan")
     table.add_column("completed", style="green", justify="right")
-    table.add_column("skipped", style="yellow", justify="right")
+    table.add_column("filtered", style="yellow", justify="right")
     table.add_column("failed", style="red", justify="right")
 
     for stage_name, counts in per_stage.items():
         table.add_row(
             stage_name,
             str(counts.get("completed", 0)),
-            str(counts.get("skipped", 0)),
+            str(counts.get("filtered", 0)),
             str(counts.get("failed", 0)),
         )
 

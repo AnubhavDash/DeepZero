@@ -8,15 +8,15 @@ from typing import Any
 import yaml
 
 from deepzero.engine.stage import (
-    BatchTool,
+    BulkMapProcessor,
     FailurePolicy,
     GlobalConfig,
-    IngestTool,
-    MapTool,
-    ReduceTool,
+    IngestProcessor,
+    MapProcessor,
+    Processor,
+    ReduceProcessor,
     StageSpec,
-    Tool,
-    resolve_tool_class,
+    resolve_processor_class,
 )
 
 log = logging.getLogger("deepzero.pipeline")
@@ -31,7 +31,6 @@ class PipelineDefinition:
         description: str,
         model: str,
         settings: dict[str, Any],
-        tools: dict[str, Any],
         knowledge: dict[str, Any],
         stage_specs: list[StageSpec],
         pipeline_dir: Path,
@@ -41,15 +40,14 @@ class PipelineDefinition:
         self.description = description
         self.model = model
         self.settings = settings
-        self.tools = tools
         self.knowledge = knowledge
         self.stage_specs = stage_specs
         self.pipeline_dir = pipeline_dir
         self.raw_yaml = raw_yaml
 
-        # resolved tool instances
-        self.ingest_tool: IngestTool | None = None
-        self.stages: list[tuple[StageSpec, Tool]] = []
+        # resolved processor instances
+        self.ingest_processor: IngestProcessor | None = None
+        self.stages: list[tuple[StageSpec, Processor]] = []
 
     @property
     def work_dir(self) -> Path:
@@ -70,7 +68,6 @@ class PipelineDefinition:
     def to_global_config(self) -> GlobalConfig:
         return {
             "settings": self.settings,
-            "tools": self.tools,
             "knowledge": self.knowledge,
             "model": self.model,
         }
@@ -94,7 +91,6 @@ def load_pipeline(
     description = data.get("description", "")
     model = model_override or data.get("model", "")
     settings = data.get("settings", {})
-    tools = data.get("tools", {})
     knowledge = data.get("knowledge", {})
 
     if work_dir_override:
@@ -115,9 +111,9 @@ def load_pipeline(
             raise ValueError(f"duplicate stage name: '{stage_name}'")
         seen_names.add(stage_name)
 
-        tool_ref = raw.get("tool", "")
-        if not tool_ref:
-            raise ValueError(f"stage '{stage_name}' must have a 'tool' field")
+        processor_ref = raw.get("processor", "")
+        if not processor_ref:
+            raise ValueError(f"stage '{stage_name}' must have a 'processor' field")
 
         on_failure_raw = raw.get("on_failure", "skip")
         try:
@@ -127,7 +123,7 @@ def load_pipeline(
 
         spec = StageSpec(
             name=stage_name,
-            tool=tool_ref,
+            processor=processor_ref,
             config=raw.get("config", {}),
             parallel=int(raw.get("parallel", 4)),
             on_failure=on_failure,
@@ -141,41 +137,39 @@ def load_pipeline(
         description=description,
         model=model,
         settings=settings,
-        tools=tools,
         knowledge=knowledge,
         stage_specs=stage_specs,
         pipeline_dir=pipeline_dir,
         raw_yaml=raw_yaml,
     )
 
-    _resolve_tools(pipeline)
+    _resolve_processors(pipeline)
+    _validate_pipeline_graph(pipeline)
 
     return pipeline
 
 
-def _resolve_tools(pipeline: PipelineDefinition) -> None:
+def _resolve_processors(pipeline: PipelineDefinition) -> None:
     for i, spec in enumerate(pipeline.stage_specs):
-        cls = resolve_tool_class(spec.tool)
+        cls = resolve_processor_class(spec.processor)
         instance = cls(spec)
 
         if i == 0:
-            # first stage must be an ingest tool
-            if not isinstance(instance, IngestTool):
+            if not isinstance(instance, IngestProcessor):
                 raise ValueError(
-                    f"first stage '{spec.name}' (tool='{spec.tool}') must be an IngestTool. "
-                    f"got {cls.__name__}. every pipeline must start with an ingest tool."
+                    f"first stage '{spec.name}' (processor='{spec.processor}') must be an IngestProcessor. "
+                    f"got {cls.__name__}. every pipeline must start with an ingest processor."
                 )
-            pipeline.ingest_tool = instance
+            pipeline.ingest_processor = instance
         else:
-            if isinstance(instance, IngestTool):
+            if isinstance(instance, IngestProcessor):
                 raise ValueError(
-                    f"stage '{spec.name}' at position {i} is an IngestTool. "
-                    f"only the first stage can be an ingest tool."
+                    f"stage '{spec.name}' at position {i} is an IngestProcessor. "
+                    f"only the first stage can be an ingest processor."
                 )
-            # accept any Tool subclass - MapTool, ReduceTool, or BatchTool
-            if not isinstance(instance, (MapTool, ReduceTool, BatchTool)):
+            if not isinstance(instance, (MapProcessor, ReduceProcessor, BulkMapProcessor)):
                 raise ValueError(
-                    f"stage '{spec.name}' at position {i} must be a MapTool, ReduceTool, or BatchTool. "
+                    f"stage '{spec.name}' at position {i} must be a MapProcessor, ReduceProcessor, or BulkMapProcessor. "
                     f"got {cls.__name__}."
                 )
             pipeline.stages.append((spec, instance))
@@ -186,6 +180,28 @@ def _resolve_tools(pipeline: PipelineDefinition) -> None:
         len(pipeline.stage_specs),
         " -> ".join(pipeline.stage_names),
     )
+
+
+def _validate_pipeline_graph(pipeline: PipelineDefinition) -> None:
+    errors: list[str] = []
+
+    all_processors = []
+    if pipeline.ingest_processor:
+        all_processors.append(pipeline.ingest_processor)
+
+    for _, proc in pipeline.stages:
+        all_processors.append(proc)
+
+    # run processor-level validation
+    for proc in all_processors:
+        problems = proc.validate()
+        for p in problems:
+            errors.append(f"processor '{proc.spec.name}': {p}")
+
+    if errors:
+        raise ValueError(
+            "pipeline validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
+        )
 
 
 def _resolve_pipeline_path(ref: str) -> tuple[Path, Path]:
@@ -261,21 +277,21 @@ def validate_pipeline(pipeline_ref: str) -> list[str]:
     if not pipeline.model:
         warnings.append("no model configured - stages that need an LLM will fail")
 
-    tool_types = []
+    from deepzero.engine.stage import ProcessorType
+
+    proc_types = []
     for spec in pipeline.stage_specs:
         try:
-            cls = resolve_tool_class(spec.tool)
-            stype = getattr(cls, "tool_type", None)
-            tool_types.append((spec.name, stype))
+            cls = resolve_processor_class(spec.processor)
+            stype = getattr(cls, "processor_type", None)
+            proc_types.append((spec.name, stype))
         except (ValueError, FileNotFoundError, ImportError, AttributeError, TypeError) as exc:
-            log.debug("tool resolution failed for '%s': %s", spec.name, exc)
-            tool_types.append((spec.name, None))
+            log.debug("processor resolution failed for '%s': %s", spec.name, exc)
+            proc_types.append((spec.name, None))
 
-    from deepzero.engine.stage import ToolType
-
-    has_map = any(st == ToolType.MAP for _, st in tool_types)
+    has_map = any(st == ProcessorType.MAP for _, st in proc_types)
     if not has_map:
-        warnings.append("no map tools found - pipeline has no sample processing stages")
+        warnings.append("no map processors found - pipeline has no sample processing stages")
 
     if not warnings:
         warnings.append("pipeline is valid - no issues found")

@@ -12,7 +12,7 @@ class TestLLMProviderProperties:
         mock_litellm = MagicMock()
         mock_litellm.suppress_debug_info = False
         with patch.dict("sys.modules", {"litellm": mock_litellm}):
-            from deepzero.providers.llm import LLMProvider
+            from deepzero.engine.llm import LLMProvider
             provider = LLMProvider(model)
         return provider
 
@@ -42,7 +42,7 @@ class TestLLMProviderComplete:
         mock_litellm = MagicMock()
         mock_litellm.suppress_debug_info = False
         with patch.dict("sys.modules", {"litellm": mock_litellm}):
-            from deepzero.providers.llm import LLMProvider
+            from deepzero.engine.llm import LLMProvider
             provider = LLMProvider("openai/gpt-4o")
         return provider, mock_litellm
 
@@ -73,7 +73,7 @@ class TestLLMProviderComplete:
         mock_litellm = MagicMock()
         mock_litellm.suppress_debug_info = False
         with patch.dict("sys.modules", {"litellm": mock_litellm}):
-            from deepzero.providers.llm import LLMProvider
+            from deepzero.engine.llm import LLMProvider
             provider = LLMProvider("openai/gpt-4o", temperature=0.5)
 
         mock_response = SimpleNamespace(
@@ -138,7 +138,7 @@ class TestLLMProviderImportGuard:
         sys.modules["litellm"] = None  # force ImportError on import
 
         try:
-            from deepzero.providers.llm import LLMProvider
+            from deepzero.engine.llm import LLMProvider
             with pytest.raises(ImportError, match="litellm"):
                 LLMProvider("openai/gpt-4o")
         finally:

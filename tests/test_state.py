@@ -25,11 +25,11 @@ class TestNamespacedState:
     def test_mark_stage_completed(self):
         from deepzero.engine.state import SampleState
         s = SampleState(sample_id="x")
-        s.mark_stage_completed("filter", verdict="skip", data={"reason": "dedup"})
+        s.mark_stage_completed("filter", verdict="filter", data={"reason": "dedup"})
         assert s.history["filter"].status == "completed"
-        assert s.history["filter"].verdict == "skip"
+        assert s.history["filter"].verdict == "filter"
         assert s.history["filter"].data["reason"] == "dedup"
-        assert s.verdict == "skipped"
+        assert s.verdict == "filtered"
 
     def test_mark_stage_failed(self):
         from deepzero.engine.state import SampleState
@@ -43,7 +43,7 @@ class TestNamespacedState:
         from deepzero.engine.state import SampleState
         s = SampleState(sample_id="x", verdict="active")
         assert s.is_active()
-        s.mark_stage_completed("filter", verdict="skip")
+        s.mark_stage_completed("filter", verdict="filter")
         assert not s.is_active()
 
     def test_is_stage_done(self):
@@ -125,7 +125,7 @@ class TestStateStore:
         store = StateStore(tmp_path / "work")
         states = [
             SampleState(sample_id="a", filename="a.sys", verdict="active"),
-            SampleState(sample_id="b", filename="b.sys", verdict="skipped"),
+            SampleState(sample_id="b", filename="b.sys", verdict="filtered"),
             SampleState(sample_id="c", filename="c.sys", verdict="failed"),
         ]
         store.save_manifest(states)
@@ -133,7 +133,7 @@ class TestStateStore:
         assert len(entries) == 3
         verdicts = {e["sample_id"]: e["verdict"] for e in entries}
         assert verdicts["a"] == "active"
-        assert verdicts["b"] == "skipped"
+        assert verdicts["b"] == "filtered"
         assert verdicts["c"] == "failed"
 
     def test_manifest_counts(self, tmp_path):
@@ -142,12 +142,12 @@ class TestStateStore:
         store.save_manifest([
             SampleState(sample_id="1", filename="1.sys", verdict="active"),
             SampleState(sample_id="2", filename="2.sys", verdict="active"),
-            SampleState(sample_id="3", filename="3.sys", verdict="skipped"),
+            SampleState(sample_id="3", filename="3.sys", verdict="filtered"),
         ])
         raw = json.loads((tmp_path / "work" / "run_manifest.json").read_text())
         assert raw["total"] == 3
         assert raw["active"] == 2
-        assert raw["skipped"] == 1
+        assert raw["filtered"] == 1
 
 
 # -- safe json encoder --

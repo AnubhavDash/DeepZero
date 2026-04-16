@@ -7,6 +7,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+from deepzero.engine.types import Verdict, StageStatus, SampleStatus, RunStatus
 
 log = logging.getLogger("deepzero.state")
 
@@ -15,7 +16,7 @@ STATE_VERSION = 2
 
 
 class SafeJSONEncoder(json.JSONEncoder):
-    # community tools will shove Path, set, datetime into data dicts
+    # community processors will shove Path, set, datetime into data dicts
     def default(self, obj):
         if isinstance(obj, Path):
             return str(obj)
@@ -41,12 +42,12 @@ def atomic_replace(src: Path, dst: Path, retries: int = 5) -> None:
 
 @dataclass
 class StageOutput:
-    status: str = "pending"
-    verdict: str = ""
+    status: StageStatus = StageStatus.PENDING
+    verdict: Verdict | str = ""
     started_at: str = ""
     completed_at: str = ""
     artifacts: dict[str, str] = field(default_factory=dict)
-    # namespaced tool output - never merged across stages
+    # namespaced processor output — never merged across stages
     data: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
 
@@ -58,7 +59,7 @@ class SampleState:
     source_path: str = ""
     filename: str = ""
     # lifecycle: pending -> active -> skipped | failed | completed
-    verdict: str = "pending"
+    verdict: SampleStatus = SampleStatus.PENDING
     current_stage: str = ""
     # per-stage namespaced output ledger
     history: dict[str, StageOutput] = field(default_factory=dict)
@@ -67,21 +68,21 @@ class SampleState:
     def mark_stage_running(self, stage_name: str) -> None:
         if stage_name not in self.history:
             self.history[stage_name] = StageOutput()
-        self.history[stage_name].status = "running"
+        self.history[stage_name].status = StageStatus.RUNNING
         self.history[stage_name].started_at = _now()
         self.current_stage = stage_name
 
     def mark_stage_completed(
         self,
         stage_name: str,
-        verdict: str = "continue",
+        verdict: Verdict | str = Verdict.CONTINUE,
         artifacts: dict[str, str] | None = None,
         data: dict[str, Any] | None = None,
     ) -> None:
         if stage_name not in self.history:
             self.history[stage_name] = StageOutput()
         stage = self.history[stage_name]
-        stage.status = "completed"
+        stage.status = StageStatus.COMPLETED
         stage.verdict = verdict
         stage.completed_at = _now()
         if artifacts:
@@ -90,38 +91,38 @@ class SampleState:
             stage.data = data
 
         # promote skip verdict to sample level
-        if verdict == "skip":
-            self.verdict = "skipped"
+        if verdict == Verdict.FILTER:
+            self.verdict = SampleStatus.FILTERED
 
     def mark_stage_failed(self, stage_name: str, error: str) -> None:
         if stage_name not in self.history:
             self.history[stage_name] = StageOutput()
         stage = self.history[stage_name]
-        stage.status = "failed"
+        stage.status = StageStatus.FAILED
         stage.error = error
         stage.completed_at = _now()
         self.error = error
-        self.verdict = "failed"
+        self.verdict = SampleStatus.FAILED
 
     def mark_stage_skipped(self, stage_name: str, reason: str = "") -> None:
         if stage_name not in self.history:
             self.history[stage_name] = StageOutput()
         stage = self.history[stage_name]
-        stage.status = "skipped"
-        stage.verdict = "skip"
+        stage.status = StageStatus.FILTERED
+        stage.verdict = Verdict.FILTER
         stage.completed_at = _now()
         if reason:
             stage.error = reason
-        self.verdict = "skipped"
+        self.verdict = SampleStatus.FILTERED
 
     def is_stage_done(self, stage_name: str) -> bool:
         s = self.history.get(stage_name)
         if s is None:
             return False
-        return s.status in ("completed", "skipped", "failed")
+        return s.status in (StageStatus.COMPLETED, StageStatus.FILTERED, StageStatus.FAILED)
 
     def is_active(self) -> bool:
-        return self.verdict in ("pending", "active")
+        return self.verdict in (SampleStatus.PENDING, SampleStatus.ACTIVE)
 
 
 @dataclass
@@ -132,20 +133,20 @@ class RunState:
     model: str = ""
     started_at: str = ""
     completed_at: str = ""
-    status: str = "pending"
+    status: RunStatus = RunStatus.PENDING
     stages: list[str] = field(default_factory=list)
     stats: dict[str, Any] = field(default_factory=dict)
 
     def mark_running(self) -> None:
-        self.status = "running"
+        self.status = RunStatus.RUNNING
         self.started_at = _now()
 
     def mark_completed(self) -> None:
-        self.status = "completed"
+        self.status = RunStatus.COMPLETED
         self.completed_at = _now()
 
     def mark_failed(self, error: str) -> None:
-        self.status = "failed"
+        self.status = RunStatus.FAILED
         self.completed_at = _now()
         self.stats["error"] = error
 
@@ -240,10 +241,10 @@ class StateStore:
         manifest = {
             "_version": STATE_VERSION,
             "total": len(entries),
-            "active": sum(1 for e in entries if e["verdict"] in ("pending", "active")),
-            "skipped": sum(1 for e in entries if e["verdict"] == "skipped"),
-            "failed": sum(1 for e in entries if e["verdict"] == "failed"),
-            "completed": sum(1 for e in entries if e["verdict"] == "completed"),
+            "active": sum(1 for e in entries if e["verdict"] in (SampleStatus.PENDING, SampleStatus.ACTIVE)),
+            "filtered": sum(1 for e in entries if e["verdict"] == SampleStatus.FILTERED),
+            "failed": sum(1 for e in entries if e["verdict"] == SampleStatus.FAILED),
+            "completed": sum(1 for e in entries if e["verdict"] == SampleStatus.COMPLETED),
             "samples": entries,
         }
         path = self.work_dir / "run_manifest.json"
@@ -297,7 +298,7 @@ def _sample_from_dict(data: dict) -> SampleState:
         sha256=data.get("sha256", ""),
         source_path=data.get("source_path", ""),
         filename=data.get("filename", ""),
-        verdict=data.get("verdict", "pending"),
+        verdict=data.get("verdict", SampleStatus.PENDING),
         current_stage=data.get("current_stage", ""),
         history=history,
         error=data.get("error"),

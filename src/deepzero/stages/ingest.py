@@ -2,18 +2,16 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any
 
-from deepzero.engine.stage import IngestTool, Sample
+from deepzero.engine.stage import IngestProcessor, Sample, ProcessorContext
 
 
-class FileDiscovery(IngestTool):
-    """generic file discovery - just finds files by extension.
-    no PE parsing, no magic bytes, no priority packs. just filesystem crawling."""
+class FileDiscovery(IngestProcessor):
+    description = "generic file discovery — finds files by extension, no format parsing"
 
-    def discover(self, target: Path, config: dict[str, Any], global_config: dict[str, Any]) -> list[Sample]:
-        extensions = config.get("extensions", [])
-        recursive = config.get("recursive", True)
+    def process(self, ctx: ProcessorContext, target: Path) -> list[Sample]:
+        extensions = self.config.get("extensions", [])
+        recursive = self.config.get("recursive", True)
 
         if target.is_file():
             return self._discover_single(target)

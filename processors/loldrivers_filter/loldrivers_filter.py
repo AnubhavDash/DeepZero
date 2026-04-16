@@ -4,17 +4,23 @@ import http.client
 import json
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from deepzero.engine.stage import MapTool, StageContext, StageResult, StageSpec
+from deepzero.engine.stage import MapProcessor, ProcessorContext, ProcessorResult, StageSpec, ProcessorEntry
 
 LOLDRIVERS_URL = "https://www.loldrivers.io/api/drivers.json"
 LOLDRIVERS_CACHE_FILE = "loldrivers.io.json"
 
 
-class LoldriversFilter(MapTool):
-    # skips samples whose sha256 matches a known entry in the loldrivers.io database
+class LoldriversFilter(MapProcessor):
+    description = "excludes samples whose sha256 matches a known entry in the loldrivers.io database"
+
+    @dataclass
+    class Config:
+        db_path: str = ""
+        cache_ttl_days: int = 7
 
     def __init__(self, spec: StageSpec):
         super().__init__(spec)
@@ -26,16 +32,14 @@ class LoldriversFilter(MapTool):
             self._load_db(db_path)
 
     def _resolve_db(self) -> Path | None:
-        db_path_raw = self.spec.config.get("db_path", "")
-
-        if db_path_raw:
-            db_path = Path(db_path_raw)
+        if self.config.db_path:
+            db_path = Path(self.config.db_path)
             if db_path.is_absolute() and db_path.exists():
                 return db_path
-            self.log.info("db_path '%s' not found, will auto-download", db_path_raw)
+            self.log.info("db_path '%s' not found, will auto-download", self.config.db_path)
 
         cached = self.cache_dir / LOLDRIVERS_CACHE_FILE
-        ttl = self.spec.config.get("cache_ttl_days", 7)
+        ttl = self.config.cache_ttl_days
 
         if cached.exists():
             age_days = (time.time() - cached.stat().st_mtime) / 86400
@@ -49,7 +53,6 @@ class LoldriversFilter(MapTool):
     def _download(self, dest: Path) -> Path | None:
         self.log.info("downloading loldrivers database from %s", LOLDRIVERS_URL)
 
-        # only allow https to prevent file:/ or custom scheme abuse (B310)
         from urllib.parse import urlparse
         parsed = urlparse(LOLDRIVERS_URL)
         if parsed.scheme != "https":
@@ -65,7 +68,7 @@ class LoldriversFilter(MapTool):
                 return None
             data = resp.read()
             conn.close()
-            
+
             dest.parent.mkdir(parents=True, exist_ok=True)
             tmp = dest.with_suffix(".tmp")
             tmp.write_bytes(data)
@@ -91,21 +94,17 @@ class LoldriversFilter(MapTool):
         except (json.JSONDecodeError, OSError, KeyError, TypeError) as e:
             self.log.warning("failed to parse db: %s", e)
 
-    def process(self, ctx: StageContext) -> StageResult:
+    def process(self, ctx: ProcessorContext, entry: ProcessorEntry) -> ProcessorResult:
         if not self._known_hashes:
-            return StageResult(status="completed", verdict="continue")
+            return ProcessorResult.ok()
 
-        # find sha256 from upstream history
         sha = ""
-        for output in ctx.history.values():
+        for output in entry.history.values():
             if "sha256" in output.data:
                 sha = str(output.data["sha256"]).lower()
                 break
 
         if sha and sha in self._known_hashes:
-            return StageResult(
-                status="completed", verdict="skip",
-                data={"reject_reason": "already in loldrivers.io database"},
-            )
+            return ProcessorResult.filter("already in loldrivers.io database")
 
-        return StageResult(status="completed", verdict="continue")
+        return ProcessorResult.ok()
