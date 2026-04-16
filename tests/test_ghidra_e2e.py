@@ -34,13 +34,10 @@ def test_physical_ghidra_pipeline_run(tmp_path):
     Absolutely unmocked physical integration test interacting natively with the
     Ghidra Java Virtual Machine installed on the local system matching user specifications.
     """
-    if not os.environ.get("DEEPZERO_RUN_GHIDRA_E2E"):
-        pytest.skip("DEEPZERO_RUN_GHIDRA_E2E not set, skipping Ghidra E2E integration test")
-
     ghidra_dir = os.environ.get("GHIDRA_INSTALL_DIR")
     if not ghidra_dir or not Path(ghidra_dir).exists():
-        pytest.skip(
-            "GHIDRA_INSTALL_DIR not set or physically invalid, skipping true E2E native run"
+        pytest.fail(
+            "GHIDRA_INSTALL_DIR not set or does not exist — Ghidra must be installed to run this test"
         )
 
     store = StateStore(tmp_path / "work")
@@ -54,7 +51,7 @@ def test_physical_ghidra_pipeline_run(tmp_path):
         sys_driver = Path("/bin/ls")
 
     if not sys_driver.exists():
-        pytest.skip(f"No native drivers found for JVM e2e payload simulation at {sys_driver}")
+        pytest.fail(f"Native binary not found at {sys_driver} — required for Ghidra E2E test")
 
     dummy_bin = tmp_path / "dummy.sys"
     import shutil
