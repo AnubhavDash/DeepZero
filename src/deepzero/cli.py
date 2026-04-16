@@ -44,8 +44,15 @@ class _ShortNameFormatter(logging.Formatter):
             record.exc_info = None
             record.exc_text = None
 
-        record.msg = f"[{short}] {record.msg}"
-        return super().format(record)
+        msg = super().format(record)
+        from rich.markup import escape
+        msg_escaped = escape(msg)
+        
+        colors = ["cyan", "magenta", "green", "yellow", "blue"]
+        color = colors[sum(ord(c) for c in short) % len(colors)]
+
+        # format dynamically and override the final payload that RichHandler receives
+        return f"[{color}]\\[{short}][/{color}] {msg_escaped}"
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -57,7 +64,9 @@ def _setup_logging(verbose: bool) -> None:
         show_level=False,
         show_time=True,
         log_time_format="%H:%M:%S",
+        markup=True,
     )
+    # the formatter now handles the full string construction and markup tagging
     handler.setFormatter(_ShortNameFormatter("%(message)s"))
     logging.basicConfig(level=level, handlers=[handler])
     if not verbose:
