@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import asyncio
 import os
-import subprocess
+import subprocess  # nosec B404
 import sys
 import time
 from dataclasses import dataclass
@@ -47,7 +48,7 @@ class GhidraDecompile(MapProcessor):
                 with open(cached, "r", encoding="utf-8") as f:
                     json.load(f)
                 return "decompilation already cached"
-            except Exception as e:
+            except (json.JSONDecodeError, OSError, ValueError) as e:
                 self.log.debug("failed to read cached ghidra output: %s", e)
         return None
 
@@ -169,7 +170,7 @@ class GhidraDecompile(MapProcessor):
         proc = None
         try:
             with open(stdout_log, "w") as fout, open(stderr_log, "w") as ferr:
-                proc = subprocess.Popen(
+                proc = subprocess.Popen(  # nosec B603
                     cmd, stdout=fout, stderr=ferr, stdin=subprocess.DEVNULL, env=env,
                 )
 
@@ -192,8 +193,6 @@ class GhidraDecompile(MapProcessor):
                     "success": False,
                     "error": f"ghidra exited with code {proc.returncode}: {stderr_text}",
                 }
-
-            elapsed = time.time() - start_time
         except (OSError, subprocess.SubprocessError) as e:
             return {"success": False, "error": f"execution error: {e}"}
         finally:

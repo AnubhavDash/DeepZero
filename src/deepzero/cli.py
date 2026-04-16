@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import tempfile
 import time
 from pathlib import Path
 from types import MappingProxyType
@@ -12,6 +10,8 @@ import click
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
+
+from deepzero.engine.types import RunStatus
 
 console = Console()
 
@@ -59,11 +59,10 @@ def _setup_logging(verbose: bool) -> None:
             logging.getLogger(lib).setLevel(logging.WARNING)
 
 def _load_env() -> None:
-    try:
+    import importlib.util
+    if importlib.util.find_spec("dotenv"):
         from dotenv import load_dotenv
         load_dotenv()
-    except ImportError:
-        pass
 
 
 def _build_runner(pipeline_def: Any) -> tuple[Any, Any]:
@@ -145,9 +144,9 @@ def run(target: str, pipeline: str, model: str | None, work_dir: str | None, ver
     run_state = runner.run(target_path, run_state)
 
     console.print()
-    if run_state.status == "completed":
+    if run_state.status == RunStatus.COMPLETED:
         console.print("[bold green]pipeline completed[/]")
-    elif run_state.status == "interrupted":
+    elif run_state.status == RunStatus.INTERRUPTED:
         console.print("[bold yellow]pipeline interrupted - use 'deepzero resume' to continue[/]")
     else:
         console.print(f"[bold red]pipeline failed: {run_state.stats.get('error', 'unknown')}[/]")
@@ -185,11 +184,11 @@ def resume(pipeline: str, model: str | None, verbose: bool):
 
     runner, _ = _build_runner(pipeline_def)
 
-    run_state.status = "running"
+    run_state.status = RunStatus.RUNNING
     run_state = runner.run(Path(run_state.target), run_state)
 
     console.print()
-    if run_state.status == "completed":
+    if run_state.status == RunStatus.COMPLETED:
         console.print("[bold green]pipeline completed[/]")
     else:
         console.print(f"[bold yellow]pipeline status: {run_state.status}[/]")
@@ -323,19 +322,7 @@ stages:
 """
 
     target_path_yaml = pipeline_dir / "pipeline.yaml"
-    fd, tmp = tempfile.mkstemp(dir=str(pipeline_dir), suffix=".yaml")
-    try:
-        os.write(fd, yaml_content.encode("utf-8"))
-        os.close(fd)
-        os.replace(tmp, str(target_path_yaml))
-    except BaseException:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
+    target_path_yaml.write_text(yaml_content, encoding="utf-8")
 
     console.print(f"[green]pipeline scaffolded at {pipeline_dir}[/]")
     console.print(f"  edit {pipeline_dir / 'pipeline.yaml'} to configure your pipeline")
@@ -404,7 +391,7 @@ def interactive(model: str, work_dir: str, verbose: bool):
             response = llm.complete(history)
             history.append({"role": "assistant", "content": response})
             console.print(f"\n[bold cyan]deepzero>[/] {response}\n")
-        except Exception as e:
+        except (RuntimeError, ValueError, TypeError, OSError, ConnectionError, TimeoutError) as e:
             console.print(f"[red]llm error ({type(e).__name__}): {e}[/]")
 
 
