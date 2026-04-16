@@ -50,7 +50,7 @@ DeepZero requires a target corpus of files to analyze and a pipeline configurati
    ```bash
    git clone https://github.com/416rehman/DeepZero.git
    cd DeepZero
-   pip install -e ".[full]"
+   pip install -e .
    ```
 
 2. **Configure Environment**

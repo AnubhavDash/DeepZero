@@ -840,9 +840,12 @@ class PipelineRunner:
             log.warning("forced shutdown")
             if hasattr(self, "_active_run_state") and getattr(self, "_active_run_state", None):
                 from deepzero.engine.types import RunStatus
+
                 self._active_run_state.status = RunStatus.INTERRUPTED
                 self.state_store.save_run(self._active_run_state)
-            if hasattr(self, "_active_sample_states") and getattr(self, "_active_sample_states", None):
+            if hasattr(self, "_active_sample_states") and getattr(
+                self, "_active_sample_states", None
+            ):
                 self.state_store.save_manifest(list(self._active_sample_states.values()))
             os._exit(1)
         log.warning("shutdown requested (press ctrl+c again to force)")

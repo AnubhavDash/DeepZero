@@ -46,13 +46,21 @@ class _ShortNameFormatter(logging.Formatter):
 
         msg = super().format(record)
         from rich.markup import escape
+
         msg_escaped = escape(msg)
 
         colors = [
-            "cyan", "magenta", "green", "yellow",
-            "bright_cyan", "bright_magenta", "bright_green", "bright_yellow"
+            "cyan",
+            "magenta",
+            "green",
+            "yellow",
+            "bright_cyan",
+            "bright_magenta",
+            "bright_green",
+            "bright_yellow",
         ]
         import zlib
+
         color = colors[zlib.crc32(short.encode("utf-8")) % len(colors)]
 
         # format dynamically and override the final payload that RichHandler receives
@@ -503,13 +511,18 @@ def _print_stats(run_state, manifest: list[dict[str, Any]] | None = None) -> Non
                 stage_name,
                 str(discovered) if discovered else "[dim white]·[/]",
                 "[dim white]·[/]",
-                "[dim white]·[/]"
+                "[dim white]·[/]",
             )
         else:
             counts = per_stage.get(stage_name, {})
             if not counts:
                 # stage completely unstarted (force dim white to strip column colors)
-                table.add_row(f"[dim white]◦ {stage_name}[/]", "[dim white]·[/]", "[dim white]·[/]", "[dim white]·[/]")
+                table.add_row(
+                    f"[dim white]◦ {stage_name}[/]",
+                    "[dim white]·[/]",
+                    "[dim white]·[/]",
+                    "[dim white]·[/]",
+                )
             else:
                 p = counts.get("completed", 0)
                 f = counts.get("filtered", 0)
