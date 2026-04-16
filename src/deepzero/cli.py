@@ -47,9 +47,13 @@ class _ShortNameFormatter(logging.Formatter):
         msg = super().format(record)
         from rich.markup import escape
         msg_escaped = escape(msg)
-        
-        colors = ["cyan", "magenta", "green", "yellow", "blue"]
-        color = colors[sum(ord(c) for c in short) % len(colors)]
+
+        colors = [
+            "cyan", "magenta", "green", "yellow",
+            "bright_cyan", "bright_magenta", "bright_green", "bright_yellow"
+        ]
+        import zlib
+        color = colors[zlib.crc32(short.encode("utf-8")) % len(colors)]
 
         # format dynamically and override the final payload that RichHandler receives
         return f"[{color}]\\[{short}][/{color}] {msg_escaped}"
@@ -496,9 +500,9 @@ def _print_stats(run_state, manifest: list[dict[str, Any]] | None = None) -> Non
             # first stage is always ingest, stats are held in discovered
             discovered = run_state.stats.get("discovered", 0)
             table.add_row(
-                stage_name, 
-                str(discovered) if discovered else "[dim white]·[/]", 
-                "[dim white]·[/]", 
+                stage_name,
+                str(discovered) if discovered else "[dim white]·[/]",
+                "[dim white]·[/]",
                 "[dim white]·[/]"
             )
         else:
