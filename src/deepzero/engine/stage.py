@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, fields
 from enum import Enum
@@ -12,6 +13,19 @@ if TYPE_CHECKING:
 
 from deepzero.engine.state import StageOutput
 from deepzero.engine.types import StageStatus, Verdict
+
+
+class ProgressReporter(Protocol):
+    def update(
+        self, amount: int = 0, total: int | None = None, description: str | None = None
+    ) -> None: ...
+
+
+class _NullProgressReporter:
+    def update(
+        self, amount: int = 0, total: int | None = None, description: str | None = None
+    ) -> None:
+        pass
 
 
 @runtime_checkable
@@ -108,6 +122,10 @@ class ProcessorContext:
     llm: LLMProtocol | None
     # logger scoped to this processor instance
     log: logging.Logger = field(default_factory=lambda: logging.getLogger("deepzero.processor"))
+    # custom progress reporting hook for external UI display
+    progress: ProgressReporter = field(default_factory=_NullProgressReporter)
+    # optional event to monitor for graceful or forced interruptions natively
+    shutdown_event: threading.Event | None = None
 
     def get_setting(self, key: str, default: Any = None) -> Any:
         # shorthand to grab a pipeline setting

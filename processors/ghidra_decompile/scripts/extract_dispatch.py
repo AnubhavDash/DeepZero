@@ -218,10 +218,15 @@ def extract_ioctl_codes(decompiled_c):
     return sorted(set(codes))
 
 
-def main():
+def _get_output_dir():
     output_dir = os.environ.get("DEEPZERO_OUTPUT_DIR", ".")
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
+    return output_dir
+
+
+def main():
+    output_dir = _get_output_dir()
 
     decomp = get_decompiler()
     result = {
@@ -366,15 +371,20 @@ def write_result(output_dir, result):
         json.dump(result, f, indent=2, default=str)
 
 
-try:
-    main()
-except (RuntimeError, ValueError, TypeError, AttributeError, OSError):
-    import traceback
+if __name__ == "__main__":
+    try:
+        main()
+    except (RuntimeError, ValueError, TypeError, AttributeError, OSError):
+        import traceback
 
-    output_dir = os.environ.get("DEEPZERO_OUTPUT_DIR", ".")
-    res = {
-        "success": False,
-        "error": "script crashed:\n" + traceback.format_exc(),
-    }
-    with open(os.path.join(output_dir, "ghidra_result.json"), "w") as f:
-        json.dump(res, f, indent=2)
+        try:
+            output_dir = _get_output_dir()
+        except Exception:
+            output_dir = os.environ.get("DEEPZERO_OUTPUT_DIR", ".")
+
+        res = {
+            "success": False,
+            "error": "script crashed:\n" + traceback.format_exc(),
+        }
+        with open(os.path.join(output_dir, "ghidra_result.json"), "w") as f:
+            json.dump(res, f, indent=2)

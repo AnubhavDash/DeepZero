@@ -198,5 +198,107 @@ class TestPipelineRunner:
         # actually, the limit triggers *after* the stage executes on active samples
         # Wait, in runner limit is applied on still_active post-stage execution.
         assert result.stats["per_stage"]["m"]["filtered"] == 3
+
+    def test_historical_resumption_math(self, tmp_path):
+        from deepzero.engine.state import Verdict
+
+        store = StateStore(tmp_path / "work")
+        run_state = RunState(run_id="test", pipeline="test")
+        store.save_run(run_state)
+
+        # simulate an aborted run with 4 discovered samples
+        # 2 passed stage1, 1 filtered, 1 failed
+        s0 = SampleState("s0", "h0", "s0.sys", "active")
+        s0.mark_stage_completed("discover", data={})
+        s0.mark_stage_completed("stage1", verdict=Verdict.CONTINUE)
+
+        s1 = SampleState("s1", "h1", "s1.sys", "active")
+        s1.mark_stage_completed("discover", data={})
+        s1.mark_stage_completed("stage1", verdict=Verdict.CONTINUE)
+
+        s2 = SampleState("s2", "h2", "s2.sys", "filtered")
+        s2.mark_stage_completed("discover", data={})
+        s2.mark_stage_completed("stage1", verdict=Verdict.FILTER)
+
+        s3 = SampleState("s3", "h3", "s3.sys", "failed")
+        s3.mark_stage_completed("discover", data={})
+        s3.mark_stage_failed("stage1", "synthetic err")
+
+        store.save_sample(s0)
+        store.save_sample(s1)
+        store.save_sample(s2)
+        store.save_sample(s3)
+
+        class CrashIngest:
+            spec = StageSpec(name="discover", processor="crash")
+
+            def setup(self, config):
+                pass
+
+            def teardown(self):
+                pass
+
+            def process(self, *args):
+                raise RuntimeError()
+
+        map_tool = MockMapProcessor(StageSpec(name="stage1", processor="mock"))
+        runner = PipelineRunner(CrashIngest(), [(map_tool.spec, map_tool)], store, tmp_path, {})
+
+        result = runner.run(Path("."), run_state)
+
+        assert result.status == "completed"
+        assert result.stats["discovered"] == 4
+
+        stats = result.stats["per_stage"]["stage1"]
+        assert stats["completed"] == 2
+        assert stats["filtered"] == 1
+        assert stats["failed"] == 1
         active_count = len([s for s in store.list_samples() if s.is_active()])
         assert active_count == 2
+
+    def test_shutdown_event_aborts_state_mutation(self, tmp_path):
+        import threading
+        import time
+
+        from deepzero.engine.stage import ProcessorResult, StageStatus
+
+        store = StateStore(tmp_path / "work")
+        run_state = RunState(run_id="test", pipeline="test")
+        store.save_run(run_state)
+
+        ingest = MockIngest(self._make_samples(10))
+
+        class LateFailProcessor:
+            spec = StageSpec(name="late_fail", processor="late", parallel=4)
+
+            def setup(self, config):
+                pass
+
+            def teardown(self):
+                pass
+
+            def process(self, ctx, entry):
+                time.sleep(0.1)
+                return ProcessorResult.fail("synthetic delayed failure")
+
+            def should_skip(self, ctx, entry):
+                return False
+
+        map_tool = LateFailProcessor()
+
+        runner = PipelineRunner(ingest, [(map_tool.spec, map_tool)], store, tmp_path, {})
+
+        def _simulate_interrupt():
+            time.sleep(0.05)
+            runner._shutdown_event.set()
+
+        t = threading.Thread(target=_simulate_interrupt)
+        t.start()
+
+        runner.run(Path("."), run_state)
+        t.join()
+
+        samples = store.list_samples()
+        for s in samples:
+            if "late_fail" in s.history:
+                assert s.history["late_fail"].status != StageStatus.FAILED

@@ -9,16 +9,12 @@ import threading
 import time
 import traceback as tb_module
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    Progress,
-    SpinnerColumn,
-    TaskProgressColumn,
-    TextColumn,
-    TimeRemainingColumn,
-)
+
+if TYPE_CHECKING:
+    from deepzero.engine.ui import PipelineDashboard
 
 from deepzero.engine.context import generate_context
 from deepzero.engine.stage import (
@@ -52,10 +48,18 @@ PROCESSOR_ERRORS = (
 )
 
 
-# suppresses info-level logs while a progress bar is active
-class _ProgressFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        return record.levelno >= logging.WARNING
+class _UIProgressAdapter:
+    def __init__(self, dashboard: PipelineDashboard | None, name: str):
+        self.dashboard = dashboard
+        self.name = name
+
+    def update(
+        self, amount: int = 0, total: int | None = None, description: str | None = None
+    ) -> None:
+        if self.dashboard:
+            self.dashboard.stage_update(
+                self.name, advance=amount, total=total, description=description
+            )
 
 
 class PipelineRunner:
@@ -71,6 +75,7 @@ class PipelineRunner:
         llm: LLMProtocol | None = None,
         default_max_workers: int = 4,
         console: Console | None = None,
+        dashboard: PipelineDashboard | None = None,
     ):
         self.ingest = ingest
         self.stages = stages
@@ -80,6 +85,7 @@ class PipelineRunner:
         self.llm = llm
         self.default_max_workers = default_max_workers
         self.console = console or Console()
+        self.dashboard = dashboard
         self._shutdown_event = threading.Event()
         self._original_sigint = None
 
@@ -124,15 +130,34 @@ class PipelineRunner:
         run_state: RunState,
     ) -> RunState:
         stage_names = [self.ingest.spec.name] + [s.name for s, _ in self.stages]
-        log.info("--- setup --- initializing %d tools", len(stage_names))
+        log.info("setup: initializing %d processors", len(stage_names))
 
         self.ingest.setup(self.global_config)
         for _, processor in self.stages:
             processor.setup(self.global_config)
 
-        log.info("--- setup complete ---")
         log.info("pipeline: %s", " -> ".join(stage_names))
 
+        if self.dashboard:
+            self.dashboard.start()
+
+        try:
+            return self._run_all_stages(target, run_state, stage_names)
+        finally:
+            if self.dashboard:
+                status = (
+                    run_state.status.value
+                    if hasattr(run_state.status, "value")
+                    else str(run_state.status)
+                )
+                self.dashboard.finish(status)
+
+    def _run_all_stages(
+        self,
+        target: Path,
+        run_state: RunState,
+        stage_names: list[str],
+    ) -> RunState:
         sample_states = self._resume_or_ingest(target, run_state, stage_names)
         if sample_states is None:
             return run_state
@@ -143,15 +168,51 @@ class PipelineRunner:
                 log.warning("shutdown requested - stopping pipeline")
                 break
 
-            active = [s for s in sample_states.values() if s.is_active()]
+            from deepzero.engine.state import StageStatus, Verdict
 
-            log.info("--- %s --- %d active samples", spec.name, len(active))
+            active = []
+            for s in sample_states.values():
+                if spec.name in s.history or s.is_active():
+                    active.append(s)
+
+            log.info("%s: %d active samples", spec.name, len(active))
 
             if not active:
-                log.info("--- %s --- no active samples, skipping stage", spec.name)
+                log.info("%s: no active samples, skipping", spec.name)
+                if self.dashboard:
+                    self.dashboard.stage_skip(spec.name)
                 continue
 
             stage_stats = {"completed": 0, "filtered": 0, "failed": 0}
+
+            for s in active:
+                output = s.history.get(spec.name)
+                if output and output.status not in (StageStatus.PENDING, StageStatus.RUNNING):
+                    if output.status == StageStatus.COMPLETED and output.verdict == Verdict.FILTER:
+                        stage_stats["filtered"] += 1
+                    elif output.status == StageStatus.FILTERED:
+                        stage_stats["filtered"] += 1
+                    elif output.status == StageStatus.FAILED:
+                        stage_stats["failed"] += 1
+                    elif output.status == StageStatus.COMPLETED:
+                        stage_stats["completed"] += 1
+
+            is_fully_cached = False
+            if len(active) > 0:
+                pending_count = sum(1 for s in active if not s.is_stage_done(spec.name))
+                is_fully_cached = pending_count == 0
+
+            if self.dashboard:
+                self.dashboard.stage_start(
+                    spec.name,
+                    len(active),
+                    passed=stage_stats["completed"],
+                    filtered=stage_stats["filtered"],
+                    failed=stage_stats["failed"],
+                    is_fully_cached=is_fully_cached,
+                )
+
+            t0 = time.monotonic()
 
             if isinstance(processor, ReduceProcessor):
                 self._run_reduce(processor, active, spec, stage_stats)
@@ -162,27 +223,41 @@ class PipelineRunner:
 
             self._apply_stage_limit(spec, sample_states, stage_stats)
 
+            elapsed = time.monotonic() - t0
+
+            passed = stage_stats["completed"]
+            filtered = stage_stats["filtered"]
+            failed = stage_stats["failed"]
+            log.info(
+                "%s: %d passed, %d filtered, %d failed (%.1fs)",
+                spec.name,
+                passed,
+                filtered,
+                failed,
+                elapsed,
+            )
+
+            if self.dashboard:
+                self.dashboard.stage_done(spec.name, passed, filtered, failed, elapsed)
+                self.dashboard.set_transient_status("syncing state to disk...")
+
             # sync barrier
             self.state_store.save_manifest(list(sample_states.values()))
             self._generate_context_files(sample_states)
+
+            if self.dashboard:
+                self.dashboard.set_transient_status(None)
 
             if "per_stage" not in run_state.stats:
                 run_state.stats["per_stage"] = {}
             run_state.stats["per_stage"][spec.name] = dict(stage_stats)
             self.state_store.save_run(run_state)
 
-            passed = stage_stats["completed"]
-            filtered = stage_stats["filtered"]
-            failed = stage_stats["failed"]
-            log.info(
-                "--- %s -> %d passed, %d filtered, %d failed ---",
-                spec.name,
-                passed,
-                filtered,
-                failed,
-            )
+        if self._shutdown_event.is_set():
+            run_state.mark_interrupted()
+        elif run_state.status != RunStatus.FAILED:
+            run_state.mark_completed()
 
-        run_state.mark_completed()
         self.state_store.save_run(run_state)
         self.state_store.save_manifest(list(sample_states.values()))
         return run_state
@@ -193,38 +268,77 @@ class PipelineRunner:
         run_state: RunState,
         stage_names: list[str],
     ) -> dict[str, SampleState] | None:
+        ingest_name = self.ingest.spec.name
+
         # fast resume: if states already exist on disk, skip the expensive ingest
         existing_states = self.state_store.list_samples()
         if existing_states:
             log.info(
-                "--- resume --- found %d existing sample states, skipping ingest",
+                "resume: found %d existing samples, skipping ingest",
                 len(existing_states),
             )
             sample_states: dict[str, SampleState] = {s.sample_id: s for s in existing_states}
             run_state.stats["discovered"] = len(sample_states)
             run_state.stages = stage_names
             self.state_store.save_run(run_state)
+
+            if self.dashboard:
+                self.dashboard.stage_start(
+                    ingest_name,
+                    len(sample_states),
+                    passed=len(sample_states),
+                    is_fully_cached=True,
+                )
+                self.dashboard.stage_done(ingest_name, len(sample_states), 0, 0, 0.0)
+
             return sample_states
 
-        # fresh run
-        log.info("--- %s (ingest) ---", self.ingest.spec.name)
+        # fresh ingest
+        if self.dashboard:
+            self.dashboard.stage_start(ingest_name, 0)
+
+        t0 = time.monotonic()
+        log.info("%s: starting ingest", ingest_name)
+
         ctx = ProcessorContext(
             pipeline_dir=self.pipeline_dir,
             global_config=self.global_config,
             llm=self.llm,
+            progress=_UIProgressAdapter(self.dashboard, ingest_name),
+            shutdown_event=self._shutdown_event,
         )
         samples = self.ingest.process(ctx, target)
+        elapsed = time.monotonic() - t0
 
         run_state.stats["discovered"] = len(samples)
         run_state.stages = stage_names
         self.state_store.save_run(run_state)
 
-        log.info("--- %s -> %d samples ---", self.ingest.spec.name, len(samples))
+        log.info("%s: discovered %d samples (%.1fs)", ingest_name, len(samples), elapsed)
 
-        if not samples:
-            run_state.mark_completed()
+        if not samples or self._shutdown_event.is_set():
+            if self.dashboard:
+                self.dashboard.set_transient_status(None)
+                self.dashboard.stage_done(
+                    ingest_name,
+                    len(samples) if not self._shutdown_event.is_set() else 0,
+                    0,
+                    0,
+                    elapsed,
+                )
+
+            if not samples:
+                run_state.mark_completed()
+            else:
+                run_state.mark_interrupted()
+
             self.state_store.save_run(run_state)
             return None
+
+        if self.dashboard:
+            self.dashboard.set_transient_status(
+                f"syncing {len(samples)} discovered samples to disk..."
+            )
 
         sample_states = {}
         for sample in samples:
@@ -236,7 +350,7 @@ class PipelineRunner:
                 verdict=SampleStatus.ACTIVE,
             )
             state.mark_stage_completed(
-                self.ingest.spec.name,
+                ingest_name,
                 verdict=Verdict.CONTINUE,
                 data=sample.data,
             )
@@ -245,6 +359,11 @@ class PipelineRunner:
             self.state_store.save_sample(state)
 
         self.state_store.save_manifest(list(sample_states.values()))
+
+        if self.dashboard:
+            self.dashboard.set_transient_status(None)
+            self.dashboard.stage_done(ingest_name, len(samples), 0, 0, elapsed)
+
         return sample_states
 
     def _apply_stage_limit(
@@ -261,7 +380,7 @@ class PipelineRunner:
             return
         excess = still_active[limit:]
         log.info(
-            "  %s limit (%d): truncating %d excess samples",
+            "%s: limit %d, truncating %d excess samples",
             spec.name,
             limit,
             len(excess),
@@ -269,21 +388,12 @@ class PipelineRunner:
         for s in excess:
             s.mark_stage_skipped(spec.name, "limit reached")
             self.state_store.save_sample(s)
+            # reclassify: was counted as completed, now truncated by limit
+            if stage_stats["completed"] > 0:
+                stage_stats["completed"] -= 1
             stage_stats["filtered"] += 1
 
     # -- map execution --
-
-    def _create_progress_bar(self, description: str, total: int) -> Progress:
-        return Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TextColumn("[cyan]{task.completed}/{task.total} completed"),
-            TimeRemainingColumn(),
-            console=self.console,
-            transient=True,
-        )
 
     def _run_map(
         self,
@@ -297,8 +407,9 @@ class PipelineRunner:
         pending = [s for s in active if not s.is_stage_done(spec.name)]
         cached = len(active) - len(pending)
         if cached > 0:
-            log.info("  %d already completed (cached), %d pending", cached, len(pending))
-            stage_stats["completed"] += cached
+            log.info("%s: %d cached, %d pending", spec.name, cached, len(pending))
+            if self.dashboard:
+                self.dashboard.stage_update(spec.name, advance=cached)
 
         if not pending:
             return
@@ -306,55 +417,119 @@ class PipelineRunner:
         parallelism = spec.parallel
         if parallelism <= 0:
             parallelism = os.cpu_count() or 4
-            log.info("  %s auto-scaled to %d workers", spec.name, parallelism)
+            log.debug("%s: auto-scaled to %d workers", spec.name, parallelism)
 
-        # suppress info logs during progress bar
-        progress_filter = _ProgressFilter()
-        dz_logger = logging.getLogger("deepzero")
-        dz_logger.addFilter(progress_filter)
+        if parallelism <= 1:
+            dirty: list[SampleState] = []
+            for state in pending:
+                if self._shutdown_event.is_set():
+                    break
+                result = self._process_one_map(state, spec, processor)
+                if self._shutdown_event.is_set():
+                    break
+                self._apply_result(state, spec, result, persist=False)
+                dirty.append(state)
+                outcome = self._classify_outcome(state, spec.name)
+                stage_stats[outcome] += 1
+                if self.dashboard:
+                    self.dashboard.stage_update(
+                        spec.name,
+                        advance=1,
+                        passed=1 if outcome == "completed" else 0,
+                        filtered=1 if outcome == "filtered" else 0,
+                        failed=1 if outcome == "failed" else 0,
+                    )
+                if len(dirty) >= 50:
+                    for s in dirty:
+                        self.state_store.save_sample(s)
+                    dirty.clear()
+            for s in dirty:
+                self.state_store.save_sample(s)
+        else:
+            max_workers = min(parallelism, len(pending))
+            dirty: list[SampleState] = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_map = {
+                    executor.submit(self._process_one_map, s, spec, processor): s for s in pending
+                }
+                for future in concurrent.futures.as_completed(future_map):
+                    if self._shutdown_event.is_set():
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
 
-        try:
-            with self._create_progress_bar(spec.name, len(pending)) as progress:
-                task = progress.add_task(f"[cyan]running {spec.name}[/]", total=len(pending))
+                    state = future_map[future]
+                    exc = future.exception()
 
-                if parallelism <= 1:
-                    for state in pending:
-                        if self._shutdown_event.is_set():
-                            break
-                        self._process_one_map(state, spec, processor)
-                        outcome = self._classify_outcome(state, spec.name)
-                        stage_stats[outcome] += 1
-                        progress.advance(task)
-                else:
-                    max_workers = min(parallelism, len(pending))
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        future_map = {
-                            executor.submit(self._process_one_map, s, spec, processor): s
-                            for s in pending
-                        }
-                        for future in concurrent.futures.as_completed(future_map):
-                            if self._shutdown_event.is_set():
-                                executor.shutdown(wait=False, cancel_futures=True)
-                                break
-                            state = future_map[future]
-                            exc = future.exception()
-                            if exc:
-                                log.error("  %s unhandled error: %s", state.filename, exc)
-                                state.mark_stage_failed(spec.name, f"{type(exc).__name__}: {exc}")
-                                self.state_store.save_sample(state)
+                    if self._shutdown_event.is_set():
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
 
-                            outcome = self._classify_outcome(state, spec.name)
-                            stage_stats[outcome] += 1
-                            progress.advance(task)
-        finally:
-            dz_logger.removeFilter(progress_filter)
+                    if exc:
+                        log.error("%s: unhandled error on %s: %s", spec.name, state.filename, exc)
+                        result = ProcessorResult.fail(f"{type(exc).__name__}: {exc}")
+                    else:
+                        result = future.result()
+
+                    if self._shutdown_event.is_set() or result is None:
+                        continue
+
+                    self._apply_result(state, spec, result, persist=False)
+                    dirty.append(state)
+
+                    outcome = self._classify_outcome(state, spec.name)
+                    stage_stats[outcome] += 1
+                    if self.dashboard:
+                        self.dashboard.stage_update(
+                            spec.name,
+                            advance=1,
+                            passed=1 if outcome == "completed" else 0,
+                            filtered=1 if outcome == "filtered" else 0,
+                            failed=1 if outcome == "failed" else 0,
+                        )
+                    if len(dirty) >= 50:
+                        for s in dirty:
+                            self.state_store.save_sample(s)
+                        dirty.clear()
+            for s in dirty:
+                self.state_store.save_sample(s)
+
+    def _apply_result(
+        self,
+        state: SampleState,
+        spec: StageSpec,
+        result: ProcessorResult | None,
+        persist: bool = True,
+    ) -> None:
+        if result is None:
+            return
+
+        if result.status == StageStatus.COMPLETED:
+            if result.data and "__skipped" in result.data:
+                state.mark_stage_skipped(spec.name, result.data["__skipped"])
+            else:
+                state.mark_stage_completed(
+                    spec.name,
+                    verdict=result.verdict,
+                    artifacts=result.artifacts,
+                    data=result.data,
+                )
+        else:
+            state.mark_stage_failed(spec.name, result.error or "processor returned failed status")
+            if result.error:
+                log.error("[%s] %s failed: %s", spec.name, state.filename, result.error)
+
+        if persist:
+            self.state_store.save_sample(state)
+
+        if result.status == StageStatus.FAILED and spec.on_failure == FailurePolicy.ABORT:
+            self._shutdown_event.set()
 
     def _process_one_map(
         self,
         state: SampleState,
         spec: StageSpec,
         processor: MapProcessor,
-    ) -> None:
+    ) -> ProcessorResult | None:
         sample_dir = self.state_store.sample_dir(state.sample_id)
 
         ctx = ProcessorContext(
@@ -362,18 +537,18 @@ class PipelineRunner:
             global_config=self.global_config,
             llm=self.llm,
             log=logging.getLogger(f"deepzero.processor.{spec.name}"),
+            progress=_UIProgressAdapter(self.dashboard, spec.name),
+            shutdown_event=self._shutdown_event,
         )
         entry = self._make_entry(state)
+        sample_dir.mkdir(parents=True, exist_ok=True)
 
         # optional skip hook (e.g. cached decompilation)
         skip_reason = processor.should_skip(ctx, entry)
         if skip_reason:
-            state.mark_stage_skipped(spec.name, skip_reason)
-            self.state_store.save_sample(state)
-            return
+            return ProcessorResult.ok(data={"__skipped": skip_reason})
 
         state.mark_stage_running(spec.name)
-        self.state_store.save_sample(state)
 
         attempts = 0
         max_attempts = spec.max_retries + 1 if spec.on_failure == FailurePolicy.RETRY else 1
@@ -384,15 +559,10 @@ class PipelineRunner:
                 result = self._execute_with_timeout(processor, ctx, entry, spec.timeout)
 
                 if result.status == StageStatus.COMPLETED:
-                    state.mark_stage_completed(
-                        spec.name,
-                        verdict=result.verdict,
-                        artifacts=result.artifacts,
-                        data=result.data,
-                    )
-                    # immediate save - don't wait for barrier (resume granularity)
-                    self.state_store.save_sample(state)
-                    return
+                    return result
+
+                if self._shutdown_event.is_set():
+                    return None
 
                 if attempts < max_attempts:
                     backoff = min(2**attempts, 30)
@@ -405,20 +575,19 @@ class PipelineRunner:
                         backoff,
                         result.error,
                     )
-                    time.sleep(backoff)
+
+                    if self._shutdown_event.wait(backoff):
+                        return None
                     continue
 
-                state.mark_stage_failed(
-                    spec.name, result.error or "processor returned failed status"
-                )
-                log.error("[%s] %s failed: %s", spec.name, state.filename, result.error)
-                self.state_store.save_sample(state)
+                if self._shutdown_event.is_set():
+                    return None
 
-                if spec.on_failure == FailurePolicy.ABORT:
-                    self._shutdown_event.set()
-                return
-
+                return result
             except PROCESSOR_ERRORS as exc:
+                if self._shutdown_event.is_set():
+                    return None
+
                 error_msg = f"{type(exc).__name__}: {exc}"
 
                 # capture traceback out of band
@@ -448,16 +617,16 @@ class PipelineRunner:
                         backoff,
                         error_msg,
                     )
-                    time.sleep(backoff)
+                    if self._shutdown_event.wait(backoff):
+                        return None
                     continue
 
-                log.error("[%s] %s failed: %s", spec.name, state.filename, error_msg)
-                state.mark_stage_failed(spec.name, error_msg)
-                self.state_store.save_sample(state)
+                if self._shutdown_event.is_set():
+                    return None
 
-                if spec.on_failure == FailurePolicy.ABORT:
-                    self._shutdown_event.set()
-                return
+                return ProcessorResult.fail(error_msg)
+
+        return ProcessorResult.fail("processor max attempts exceeded")
 
     # -- reduce execution --
 
@@ -468,11 +637,13 @@ class PipelineRunner:
         spec: StageSpec,
         stage_stats: dict[str, int],
     ) -> None:
-        log.info("  reduce: %d active samples -> %s", len(active), spec.name)
+        log.info("%s: reducing %d active samples", spec.name, len(active))
         ctx = ProcessorContext(
             pipeline_dir=self.pipeline_dir,
             global_config=self.global_config,
             llm=self.llm,
+            progress=_UIProgressAdapter(self.dashboard, spec.name),
+            shutdown_event=self._shutdown_event,
         )
         entries = [self._make_entry(state) for state in active]
         try:
@@ -508,32 +679,42 @@ class PipelineRunner:
         cached = len(active) - len(pending)
         if cached > 0:
             log.info("  %d already completed (cached), %d pending", cached, len(pending))
-            stage_stats["completed"] += cached
+            if self.dashboard:
+                self.dashboard.stage_update(spec.name, advance=cached)
 
         if not pending:
             return
 
         entries = [self._make_entry(state) for state in pending]
 
-        log.info("  batch: processing %d samples with %s", len(entries), spec.name)
+        log.info("%s: batch processing %d samples", spec.name, len(entries))
 
         try:
             ctx = ProcessorContext(
                 pipeline_dir=self.pipeline_dir,
                 global_config=self.global_config,
                 llm=self.llm,
+                progress=_UIProgressAdapter(self.dashboard, spec.name),
+                shutdown_event=self._shutdown_event,
             )
             results = processor.process(ctx, entries)
         except PROCESSOR_ERRORS as exc:
+            if self._shutdown_event.wait(0.25):
+                return
             log.error("  batch processor '%s' crashed: %s", spec.name, exc)
             for state in pending:
                 state.mark_stage_failed(spec.name, f"batch processor crashed: {exc}")
                 self.state_store.save_sample(state)
                 stage_stats["failed"] += 1
+                if self.dashboard:
+                    self.dashboard.stage_update(spec.name, advance=1, failed=1)
             return
 
         # map results back to states by index
         for i, state in enumerate(pending):
+            if self._shutdown_event.is_set():
+                break
+
             if i < len(results):
                 result = results[i]
                 if result.status == StageStatus.COMPLETED:
@@ -553,6 +734,14 @@ class PipelineRunner:
             self.state_store.save_sample(state)
             outcome = self._classify_outcome(state, spec.name)
             stage_stats[outcome] += 1
+            if self.dashboard:
+                self.dashboard.stage_update(
+                    spec.name,
+                    advance=1,
+                    passed=1 if outcome == "completed" else 0,
+                    filtered=1 if outcome == "filtered" else 0,
+                    failed=1 if outcome == "failed" else 0,
+                )
 
     # -- helpers --
 
@@ -584,24 +773,37 @@ class PipelineRunner:
                 raise TimeoutError(f"processor timed out after {timeout}s")
 
     def _generate_context_files(self, sample_states: dict[str, SampleState]) -> None:
-        for sid, state in sample_states.items():
-            if state.is_active():
-                sample_dir = self.state_store.sample_dir(sid)
+        active_items = [(sid, state) for sid, state in sample_states.items() if state.is_active()]
+        if not active_items:
+            return
+
+        def _gen(sid: str, state: SampleState) -> None:
+            sample_dir = self.state_store.sample_dir(sid)
+            state_file = sample_dir / "state.json"
+            context_file = sample_dir / "context.md"
+
+            if context_file.exists() and state_file.exists():
                 try:
-                    generate_context(sample_dir, state)
-                except (
-                    ValueError,
-                    TypeError,
-                    OSError,
-                    RuntimeError,
-                    AttributeError,
-                ) as exc:
-                    log.warning(
-                        "context generation failed for %s: %s - %s",
-                        sid,
-                        type(exc).__name__,
-                        exc,
-                    )
+                    if context_file.stat().st_mtime >= state_file.stat().st_mtime:
+                        return
+                except OSError:
+                    pass
+
+            try:
+                generate_context(sample_dir, state)
+            except PROCESSOR_ERRORS as exc:
+                log.warning(
+                    "context generation failed for %s: %s - %s", sid, type(exc).__name__, exc
+                )
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(32, (os.cpu_count() or 4) * 4)
+        ) as executor:
+            future_map = {executor.submit(_gen, sid, state): sid for sid, state in active_items}
+            for _ in concurrent.futures.as_completed(future_map):
+                if self._shutdown_event.is_set():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
 
     def _teardown_tools(self) -> None:
         errors: list[str] = []

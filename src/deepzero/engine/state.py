@@ -150,6 +150,10 @@ class RunState:
         self.status = RunStatus.COMPLETED
         self.completed_at = _now()
 
+    def mark_interrupted(self) -> None:
+        self.status = RunStatus.INTERRUPTED
+        self.completed_at = _now()
+
     def mark_failed(self, error: str) -> None:
         self.status = RunStatus.FAILED
         self.completed_at = _now()
