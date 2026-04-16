@@ -9,16 +9,11 @@ import threading
 import time
 import traceback as tb_module
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    Progress,
-    SpinnerColumn,
-    TaskProgressColumn,
-    TextColumn,
-    TimeRemainingColumn,
-)
+if TYPE_CHECKING:
+    from deepzero.engine.ui import PipelineDashboard
 
 from deepzero.engine.context import generate_context
 from deepzero.engine.stage import (
@@ -52,10 +47,6 @@ PROCESSOR_ERRORS = (
 )
 
 
-# suppresses info-level logs while a progress bar is active
-class _ProgressFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        return record.levelno >= logging.WARNING
 
 
 class PipelineRunner:
@@ -71,6 +62,7 @@ class PipelineRunner:
         llm: LLMProtocol | None = None,
         default_max_workers: int = 4,
         console: Console | None = None,
+        dashboard: PipelineDashboard | None = None,
     ):
         self.ingest = ingest
         self.stages = stages
@@ -80,6 +72,7 @@ class PipelineRunner:
         self.llm = llm
         self.default_max_workers = default_max_workers
         self.console = console or Console()
+        self.dashboard = dashboard
         self._shutdown_event = threading.Event()
         self._original_sigint = None
 
@@ -124,15 +117,30 @@ class PipelineRunner:
         run_state: RunState,
     ) -> RunState:
         stage_names = [self.ingest.spec.name] + [s.name for s, _ in self.stages]
-        log.info("--- setup --- initializing %d tools", len(stage_names))
+        log.info("setup: initializing %d processors", len(stage_names))
 
         self.ingest.setup(self.global_config)
         for _, processor in self.stages:
             processor.setup(self.global_config)
 
-        log.info("--- setup complete ---")
         log.info("pipeline: %s", " -> ".join(stage_names))
 
+        if self.dashboard:
+            self.dashboard.start()
+
+        try:
+            return self._run_all_stages(target, run_state, stage_names)
+        finally:
+            if self.dashboard:
+                status = run_state.status.value if hasattr(run_state.status, "value") else str(run_state.status)
+                self.dashboard.finish(status)
+
+    def _run_all_stages(
+        self,
+        target: Path,
+        run_state: RunState,
+        stage_names: list[str],
+    ) -> RunState:
         sample_states = self._resume_or_ingest(target, run_state, stage_names)
         if sample_states is None:
             return run_state
@@ -145,13 +153,19 @@ class PipelineRunner:
 
             active = [s for s in sample_states.values() if s.is_active()]
 
-            log.info("--- %s --- %d active samples", spec.name, len(active))
+            log.info("%s: %d active samples", spec.name, len(active))
 
             if not active:
-                log.info("--- %s --- no active samples, skipping stage", spec.name)
+                log.info("%s: no active samples, skipping", spec.name)
+                if self.dashboard:
+                    self.dashboard.stage_skip(spec.name)
                 continue
 
+            if self.dashboard:
+                self.dashboard.stage_start(spec.name, len(active))
+
             stage_stats = {"completed": 0, "filtered": 0, "failed": 0}
+            t0 = time.monotonic()
 
             if isinstance(processor, ReduceProcessor):
                 self._run_reduce(processor, active, spec, stage_stats)
@@ -161,6 +175,8 @@ class PipelineRunner:
                 self._run_map(processor, active, spec, stage_stats)
 
             self._apply_stage_limit(spec, sample_states, stage_stats)
+
+            elapsed = time.monotonic() - t0
 
             # sync barrier
             self.state_store.save_manifest(list(sample_states.values()))
@@ -175,12 +191,16 @@ class PipelineRunner:
             filtered = stage_stats["filtered"]
             failed = stage_stats["failed"]
             log.info(
-                "--- %s -> %d passed, %d filtered, %d failed ---",
+                "%s: %d passed, %d filtered, %d failed (%.1fs)",
                 spec.name,
                 passed,
                 filtered,
                 failed,
+                elapsed,
             )
+
+            if self.dashboard:
+                self.dashboard.stage_done(spec.name, passed, filtered, failed, elapsed)
 
         run_state.mark_completed()
         self.state_store.save_run(run_state)
@@ -193,35 +213,49 @@ class PipelineRunner:
         run_state: RunState,
         stage_names: list[str],
     ) -> dict[str, SampleState] | None:
+        ingest_name = self.ingest.spec.name
+
         # fast resume: if states already exist on disk, skip the expensive ingest
         existing_states = self.state_store.list_samples()
         if existing_states:
             log.info(
-                "--- resume --- found %d existing sample states, skipping ingest",
+                "resume: found %d existing samples, skipping ingest",
                 len(existing_states),
             )
             sample_states: dict[str, SampleState] = {s.sample_id: s for s in existing_states}
             run_state.stats["discovered"] = len(sample_states)
             run_state.stages = stage_names
             self.state_store.save_run(run_state)
+
+            if self.dashboard:
+                self.dashboard.stage_done(ingest_name, len(sample_states), 0, 0, 0.0)
+
             return sample_states
 
-        # fresh run
-        log.info("--- %s (ingest) ---", self.ingest.spec.name)
+        # fresh ingest
+        if self.dashboard:
+            self.dashboard.stage_start(ingest_name, 0)
+
+        t0 = time.monotonic()
+        log.info("%s: starting ingest", ingest_name)
+
         ctx = ProcessorContext(
             pipeline_dir=self.pipeline_dir,
             global_config=self.global_config,
             llm=self.llm,
         )
         samples = self.ingest.process(ctx, target)
+        elapsed = time.monotonic() - t0
 
         run_state.stats["discovered"] = len(samples)
         run_state.stages = stage_names
         self.state_store.save_run(run_state)
 
-        log.info("--- %s -> %d samples ---", self.ingest.spec.name, len(samples))
+        log.info("%s: discovered %d samples (%.1fs)", ingest_name, len(samples), elapsed)
 
         if not samples:
+            if self.dashboard:
+                self.dashboard.stage_done(ingest_name, 0, 0, 0, elapsed)
             run_state.mark_completed()
             self.state_store.save_run(run_state)
             return None
@@ -236,7 +270,7 @@ class PipelineRunner:
                 verdict=SampleStatus.ACTIVE,
             )
             state.mark_stage_completed(
-                self.ingest.spec.name,
+                ingest_name,
                 verdict=Verdict.CONTINUE,
                 data=sample.data,
             )
@@ -245,6 +279,10 @@ class PipelineRunner:
             self.state_store.save_sample(state)
 
         self.state_store.save_manifest(list(sample_states.values()))
+
+        if self.dashboard:
+            self.dashboard.stage_done(ingest_name, len(samples), 0, 0, elapsed)
+
         return sample_states
 
     def _apply_stage_limit(
@@ -261,7 +299,7 @@ class PipelineRunner:
             return
         excess = still_active[limit:]
         log.info(
-            "  %s limit (%d): truncating %d excess samples",
+            "%s: limit %d, truncating %d excess samples",
             spec.name,
             limit,
             len(excess),
@@ -269,21 +307,12 @@ class PipelineRunner:
         for s in excess:
             s.mark_stage_skipped(spec.name, "limit reached")
             self.state_store.save_sample(s)
+            # reclassify: was counted as completed, now truncated by limit
+            if stage_stats["completed"] > 0:
+                stage_stats["completed"] -= 1
             stage_stats["filtered"] += 1
 
     # -- map execution --
-
-    def _create_progress_bar(self, description: str, total: int) -> Progress:
-        return Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TextColumn("[cyan]{task.completed}/{task.total} completed"),
-            TimeRemainingColumn(),
-            console=self.console,
-            transient=True,
-        )
 
     def _run_map(
         self,
@@ -297,7 +326,9 @@ class PipelineRunner:
         pending = [s for s in active if not s.is_stage_done(spec.name)]
         cached = len(active) - len(pending)
         if cached > 0:
-            log.info("  %d already completed (cached), %d pending", cached, len(pending))
+            log.info(
+                "%s: %d cached, %d pending", spec.name, cached, len(pending)
+            )
             stage_stats["completed"] += cached
 
         if not pending:
@@ -306,48 +337,47 @@ class PipelineRunner:
         parallelism = spec.parallel
         if parallelism <= 0:
             parallelism = os.cpu_count() or 4
-            log.info("  %s auto-scaled to %d workers", spec.name, parallelism)
+            log.debug("%s: auto-scaled to %d workers", spec.name, parallelism)
 
-        # suppress info logs during progress bar
-        progress_filter = _ProgressFilter()
-        dz_logger = logging.getLogger("deepzero")
-        dz_logger.addFilter(progress_filter)
+        if parallelism <= 1:
+            for state in pending:
+                if self._shutdown_event.is_set():
+                    break
+                self._process_one_map(state, spec, processor)
+                outcome = self._classify_outcome(state, spec.name)
+                stage_stats[outcome] += 1
+                if self.dashboard:
+                    self.dashboard.stage_progress(spec.name)
+        else:
+            max_workers = min(parallelism, len(pending))
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers
+            ) as executor:
+                future_map = {
+                    executor.submit(
+                        self._process_one_map, s, spec, processor
+                    ): s
+                    for s in pending
+                }
+                for future in concurrent.futures.as_completed(future_map):
+                    if self._shutdown_event.is_set():
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+                    state = future_map[future]
+                    exc = future.exception()
+                    if exc:
+                        log.error(
+                            "%s: unhandled error on %s: %s", spec.name, state.filename, exc
+                        )
+                        state.mark_stage_failed(
+                            spec.name, f"{type(exc).__name__}: {exc}"
+                        )
+                        self.state_store.save_sample(state)
 
-        try:
-            with self._create_progress_bar(spec.name, len(pending)) as progress:
-                task = progress.add_task(f"[cyan]running {spec.name}[/]", total=len(pending))
-
-                if parallelism <= 1:
-                    for state in pending:
-                        if self._shutdown_event.is_set():
-                            break
-                        self._process_one_map(state, spec, processor)
-                        outcome = self._classify_outcome(state, spec.name)
-                        stage_stats[outcome] += 1
-                        progress.advance(task)
-                else:
-                    max_workers = min(parallelism, len(pending))
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        future_map = {
-                            executor.submit(self._process_one_map, s, spec, processor): s
-                            for s in pending
-                        }
-                        for future in concurrent.futures.as_completed(future_map):
-                            if self._shutdown_event.is_set():
-                                executor.shutdown(wait=False, cancel_futures=True)
-                                break
-                            state = future_map[future]
-                            exc = future.exception()
-                            if exc:
-                                log.error("  %s unhandled error: %s", state.filename, exc)
-                                state.mark_stage_failed(spec.name, f"{type(exc).__name__}: {exc}")
-                                self.state_store.save_sample(state)
-
-                            outcome = self._classify_outcome(state, spec.name)
-                            stage_stats[outcome] += 1
-                            progress.advance(task)
-        finally:
-            dz_logger.removeFilter(progress_filter)
+                    outcome = self._classify_outcome(state, spec.name)
+                    stage_stats[outcome] += 1
+                    if self.dashboard:
+                        self.dashboard.stage_progress(spec.name)
 
     def _process_one_map(
         self,
@@ -468,7 +498,7 @@ class PipelineRunner:
         spec: StageSpec,
         stage_stats: dict[str, int],
     ) -> None:
-        log.info("  reduce: %d active samples -> %s", len(active), spec.name)
+        log.info("%s: reducing %d active samples", spec.name, len(active))
         ctx = ProcessorContext(
             pipeline_dir=self.pipeline_dir,
             global_config=self.global_config,
@@ -515,7 +545,7 @@ class PipelineRunner:
 
         entries = [self._make_entry(state) for state in pending]
 
-        log.info("  batch: processing %d samples with %s", len(entries), spec.name)
+        log.info("%s: batch processing %d samples", spec.name, len(entries))
 
         try:
             ctx = ProcessorContext(

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 220" width="1200" height="220">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#050505" />
+      <stop offset="100%" stop-color="#0a0a0a" />
+    </linearGradient>
+
+    <!-- Subtle Glows (Vercel/Linear style) -->
+    <radialGradient id="glow1" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.15" />
+      <stop offset="100%" stop-color="#3b82f6" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="glow2" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#8b5cf6" stop-opacity="0.15" />
+      <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0" />
+    </radialGradient>
+
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#ffffff" stroke-width="1" stroke-opacity="0.03" />
+    </pattern>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="220" rx="24" fill="url(#bg)" />
+  <rect width="1200" height="220" rx="24" fill="url(#grid)" />
+  
+  <!-- Orbs -->
+  <circle cx="300" cy="0" r="400" fill="url(#glow1)" />
+  <circle cx="900" cy="300" r="400" fill="url(#glow2)" />
+
+  <!-- Typography -->
+  <g transform="translate(600, 115)" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+    <text y="0" font-size="72" font-weight="700" fill="#ffffff" letter-spacing="-1.5">
+      Deep<tspan fill="#e2e8f0">Zero</tspan>
+    </text>
+    <text y="45" font-size="16" font-weight="400" fill="#94a3b8" letter-spacing="4">
+      AUTOMATED VULNERABILITY RESEARCH
+    </text>
+  </g>
+</svg>

@@ -22,6 +22,13 @@ jobs:
         python-version: ${{ matrix.python-version }}
         cache: 'pip'
         
+    - name: Install Java and Ghidra
+      run: |
+        sudo apt-get update && sudo apt-get install -y default-jdk wget unzip
+        wget https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.0.3_build/ghidra_11.0.3_PUBLIC_20240410.zip -O ghidra.zip
+        unzip -q ghidra.zip -d /opt/
+        echo "GHIDRA_INSTALL_DIR=/opt/ghidra_11.0.3_PUBLIC" >> $GITHUB_ENV
+        
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip

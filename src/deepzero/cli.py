@@ -73,7 +73,7 @@ def _load_env() -> None:
         load_dotenv()
 
 
-def _build_runner(pipeline_def: Any) -> tuple[Any, Any]:
+def _build_runner(pipeline_def: Any, dashboard: Any = None) -> tuple[Any, Any]:
     # shared setup for run/resume - builds PipelineRunner and optional LLM provider
     from deepzero.engine.llm import LLMProvider
     from deepzero.engine.runner import PipelineRunner
@@ -92,6 +92,7 @@ def _build_runner(pipeline_def: Any) -> tuple[Any, Any]:
         llm=llm,
         default_max_workers=pipeline_def.max_workers,
         console=console,
+        dashboard=dashboard,
     )
 
     return runner, llm
@@ -123,20 +124,25 @@ def run(target: str, pipeline: str, model: str | None, work_dir: str | None, ver
     from deepzero.engine.state import RunState, StateStore
 
     target_path = Path(target).resolve()
-    console.print(f"\n[bold cyan]deepzero[/] - running pipeline [bold]{pipeline}[/]")
-    console.print(f"  target: {target_path}")
 
     try:
         pipeline_def = load_pipeline(pipeline, model_override=model, work_dir_override=work_dir)
     except ValueError as e:
         console.print(f"[bold red]X ERROR[/]: {e}")
         raise SystemExit(1)
-    console.print(f"  pipeline: {pipeline_def.name} ({len(pipeline_def.stage_specs)} stages)")
-    console.print(f"  stages: {' -> '.join(pipeline_def.stage_names)}")
 
-    runner, llm = _build_runner(pipeline_def)
-    if llm:
-        console.print(f"  model: {pipeline_def.model}")
+
+    from deepzero.engine.ui import PipelineDashboard
+
+    dashboard = PipelineDashboard(pipeline_def.stage_names, console=console)
+    dashboard.print_header(
+        name=pipeline_def.name,
+        target=str(target_path),
+        model=pipeline_def.model,
+        work_dir=str(pipeline_def.work_dir),
+    )
+
+    runner, llm = _build_runner(pipeline_def, dashboard=dashboard)
 
     # initialize state store
     state_store = StateStore(pipeline_def.work_dir)
@@ -151,18 +157,9 @@ def run(target: str, pipeline: str, model: str | None, work_dir: str | None, ver
         model=pipeline_def.model,
     )
 
-    console.print(f"  work_dir: {pipeline_def.work_dir}")
-    console.print()
-
     run_state = runner.run(target_path, run_state)
 
-    console.print()
-    if run_state.status == RunStatus.COMPLETED:
-        console.print("[bold green]pipeline completed[/]")
-    elif run_state.status == RunStatus.INTERRUPTED:
-        console.print("[bold yellow]pipeline interrupted - use 'deepzero resume' to continue[/]")
-    else:
-        console.print(f"[bold red]pipeline failed: {run_state.stats.get('error', 'unknown')}[/]")
+
 
 
 @main.command()
@@ -201,21 +198,21 @@ def resume(pipeline: str, model: str | None, verbose: bool):
         console.print("[red]no run state found in work directory[/]")
         raise SystemExit(1)
 
-    console.print(
-        f"[bold cyan]resuming[/] pipeline '{run_state.pipeline}' (run {run_state.run_id})"
-    )
-    console.print(f"  status: {run_state.status}")
+    from deepzero.engine.ui import PipelineDashboard
 
-    runner, _ = _build_runner(pipeline_def)
+    dashboard = PipelineDashboard(pipeline_def.stage_names, console=console)
+    dashboard.print_header(
+        name=f"{pipeline_def.name} (resuming run {run_state.run_id})",
+        target=run_state.target,
+        model=pipeline_def.model,
+        work_dir=str(pipeline_def.work_dir),
+    )
+
+    runner, _ = _build_runner(pipeline_def, dashboard=dashboard)
 
     run_state.status = RunStatus.RUNNING
     run_state = runner.run(Path(run_state.target), run_state)
 
-    console.print()
-    if run_state.status == RunStatus.COMPLETED:
-        console.print("[bold green]pipeline completed[/]")
-    else:
-        console.print(f"[bold yellow]pipeline status: {run_state.status}[/]")
 
 
 @main.command()
