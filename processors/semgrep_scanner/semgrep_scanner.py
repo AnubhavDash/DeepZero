@@ -16,7 +16,7 @@ class SemgrepScanner(BulkMapProcessor):
 
     def validate(self) -> list[str]:
         if not shutil.which("semgrep"):
-            return ["semgrep CLI not found in PATH — install with: pip install semgrep"]
+            return ["semgrep CLI not found in PATH - install with: pip install semgrep"]
         return []
 
     def process(self, ctx: ProcessorContext, entries: list[Sample]) -> list[ProcessorResult]:
@@ -48,7 +48,7 @@ class SemgrepScanner(BulkMapProcessor):
             scan_dir = entry.sample_dir / target_subdir
             if not scan_dir.exists():
                 results[i] = ProcessorResult.fail(
-                    f"scan target '{target_subdir}' missing — does a decompile processor run before this?"
+                    f"scan target '{target_subdir}' missing - does a decompile processor run before this?"
                 )
                 continue
 
@@ -105,7 +105,7 @@ class SemgrepScanner(BulkMapProcessor):
         except FileNotFoundError:
             self._cleanup_bulk_dir(bulk_dir)
             for idx, _ in uncached_entries:
-                results[idx] = ProcessorResult.fail("semgrep not installed — pip install semgrep")
+                results[idx] = ProcessorResult.fail("semgrep not installed - pip install semgrep")
             return [r for r in results if r is not None]
         except subprocess.TimeoutExpired:
             self._cleanup_bulk_dir(bulk_dir)

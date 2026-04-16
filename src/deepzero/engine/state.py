@@ -47,7 +47,7 @@ class StageOutput:
     started_at: str = ""
     completed_at: str = ""
     artifacts: dict[str, str] = field(default_factory=dict)
-    # namespaced processor output — never merged across stages
+    # namespaced processor output - never merged across stages
     data: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
 

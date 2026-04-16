@@ -30,7 +30,7 @@ class GhidraDecompile(MapProcessor):
 
     def validate(self) -> list[str]:
         if not self.config.ghidra_install_dir:
-            return ["ghidra_install_dir is required — set it in config or via ${GHIDRA_INSTALL_DIR}"]
+            return ["ghidra_install_dir is required - set it in config or via ${GHIDRA_INSTALL_DIR}"]
         ghidra_dir = Path(self.config.ghidra_install_dir)
         if not ghidra_dir.exists():
             return [f"ghidra not found at {ghidra_dir}"]
@@ -201,7 +201,7 @@ class GhidraDecompile(MapProcessor):
                 try:
                     proc.kill()
                 except OSError as exc:
-                    log.debug("cleanup kill skipped — pid already exited: %s", exc)
+                    log.debug("cleanup kill skipped - pid already exited: %s", exc)
 
         if not cached_result.exists():
             contents = [f.name for f in output_dir.iterdir()] if output_dir.exists() else []
@@ -233,5 +233,5 @@ class GhidraDecompile(MapProcessor):
                 return p
 
         raise FileNotFoundError(
-            f"analyzeHeadless not found in {ghidra_dir}/support/ — verify ghidra install directory"
+            f"analyzeHeadless not found in {ghidra_dir}/support/ - verify ghidra install directory"
         )

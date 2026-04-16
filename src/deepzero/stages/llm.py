@@ -14,7 +14,7 @@ _log = logging.getLogger("deepzero.stages.llm")
 
 
 class GenericLLM(MapProcessor):
-    description = "generic LLM assessment — sends context to an LLM via a jinja2 prompt template"
+    description = "generic LLM assessment - sends context to an LLM via a jinja2 prompt template"
 
     def process(self, ctx: ProcessorContext, entry: ProcessorEntry) -> ProcessorResult:
         if ctx.llm is None:

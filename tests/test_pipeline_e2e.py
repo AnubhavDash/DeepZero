@@ -144,10 +144,10 @@ class TestPipelineE2E:
         runner1 = PipelineRunner(ingest, [(m_proc1.spec, m_proc1), (m_proc2_crash.spec, m_proc2_crash)], store, tmp_path, {})
         runner1.run(Path("."), run_state)
 
-        # abort causes the first crash to stop the pipeline — status depends on runner implementation
+        # abort causes the first crash to stop the pipeline - status depends on runner implementation
         assert run_state.status in ("interrupted", "completed", "failed")
 
-        # resume with cache — m1 should be skipped via should_skip()
+        # resume with cache - m1 should be skipped via should_skip()
         m_proc1_resumed = E2EMapProcessor(StageSpec(name="m1", processor="mock_success", config={"cache_marker": True}))
         m_proc2_resumed = E2EMapProcessor(StageSpec(name="m2", processor="mock_success"))
 

@@ -34,7 +34,7 @@ deepzero resume -p loldrivers
 
 ## Architecture: Polymorphic Processor Primitives
 
-DeepZero V2 enforces strict processor interfaces that allow for powerful pipeline semantics:
+DeepZero enforces strict processor interfaces that allow for powerful pipeline semantics:
 
 | Primitive | Operation | Description |
 |-----------|-----------|-------------|

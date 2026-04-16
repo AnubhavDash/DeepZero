@@ -508,7 +508,7 @@ class PipelineRunner:
                     generate_context(sample_dir, state)
                 except (ValueError, TypeError, OSError, RuntimeError, AttributeError) as exc:
                     log.warning(
-                        "context generation failed for %s: %s — %s",
+                        "context generation failed for %s: %s - %s",
                         sid, type(exc).__name__, exc,
                     )
 

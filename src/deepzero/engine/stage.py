@@ -54,7 +54,7 @@ class Sample:
     source_path: Path
     # display name
     filename: str
-    # initial data from discovery — goes into history["discover"].data
+    # initial data from discovery - goes into history["discover"].data
     data: dict[str, Any] = field(default_factory=dict)
 
 
@@ -120,7 +120,7 @@ class ProcessorResult:
     verdict: Verdict = Verdict.CONTINUE
     # name -> relative path of files this processor produced
     artifacts: dict[str, str] = field(default_factory=dict)
-    # namespaced output — written to history[processor_name].data
+    # namespaced output - written to history[processor_name].data
     data: dict[str, Any] = field(default_factory=dict)
     # human-readable error message if status is "failed"
     error: str | None = None
@@ -140,7 +140,7 @@ class ProcessorResult:
 
     @classmethod
     def fail(cls, error: str) -> ProcessorResult:
-        # processing failed — sample is dead
+        # processing failed - sample is dead
         return cls(status=StageStatus.FAILED, error=error)
 
 
@@ -148,9 +148,9 @@ class ProcessorResult:
 class StageSpec:
     # unique instance name within the pipeline
     name: str
-    # processor reference — bare name for built-in, dir/file.py for external
+    # processor reference - bare name for built-in, dir/file.py for external
     processor: str
-    # processor config from yaml — parsed into a Config dataclass if the processor declares one
+    # processor config from yaml - parsed into a Config dataclass if the processor declares one
     config: dict[str, Any] = field(default_factory=dict)
     # concurrency: how many samples to process in parallel (0 = auto/max hardware)
     parallel: int = 0
@@ -168,10 +168,10 @@ class StageSpec:
 # community authors subclass one of these four base classes.
 # each type has a different relationship with the sample stream:
 #
-#   IngestProcessor  — discovers samples from a source
-#   MapProcessor     — transforms one sample at a time
-#   ReduceProcessor  — sees all samples, decides who survives
-#   BulkMapProcessor   — processes all samples in one invocation
+#   IngestProcessor  - discovers samples from a source
+#   MapProcessor     - transforms one sample at a time
+#   ReduceProcessor  - sees all samples, decides who survives
+#   BulkMapProcessor   - processes all samples in one invocation
 
 
 class Processor(ABC):
@@ -191,7 +191,7 @@ class Processor(ABC):
     # use validate() to check if required fields are empty after expansion.
     Config: ClassVar[type | None] = None
 
-    # human-readable metadata — used by `deepzero list-processors` and future web UI
+    # human-readable metadata - used by `deepzero list-processors` and future web UI
     description: ClassVar[str] = ""
     version: ClassVar[str] = "1.0"
 
@@ -224,7 +224,7 @@ class Processor(ABC):
 
     @property
     def processor_dir(self) -> Path:
-        # directory containing this processor's source file — useful for locating
+        # directory containing this processor's source file - useful for locating
         # co-located assets like scripts, templates, or rule files
         if self._source_file is not None:
             return self._source_file.parent
@@ -264,7 +264,7 @@ class IngestProcessor(Processor):
 
 class MapProcessor(Processor):
     # processes one sample at a time. the engine fans out via ThreadPoolExecutor.
-    # must be thread-safe — no shared mutable state in process().
+    # must be thread-safe - no shared mutable state in process().
     #
     #   sample_a ──▶ [ MapProcessor ] ──▶ result_a   (ok / filter / fail)
     #   sample_b ──▶ [ MapProcessor ] ──▶ result_b   ← parallel via thread pool
@@ -281,7 +281,7 @@ class MapProcessor(Processor):
     def should_skip(self, ctx: ProcessorContext, entry: ProcessorEntry) -> str | None:
         # override to skip already-processed samples (e.g. cached output files).
         # return a reason string to skip, or None to process normally.
-        # skipped samples count as "passed" — the work was already done previously.
+        # skipped samples count as "passed" - the work was already done previously.
         return None
 
 

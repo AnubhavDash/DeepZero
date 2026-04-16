@@ -7,7 +7,7 @@ from deepzero.engine.stage import MapProcessor, ProcessorContext, ProcessorResul
 
 
 class HashExclude(MapProcessor):
-    description = "hash-based exclusion filter — skips samples whose hash matches a known set"
+    description = "hash-based exclusion filter - skips samples whose hash matches a known set"
 
     def __init__(self, spec: StageSpec):
         super().__init__(spec)

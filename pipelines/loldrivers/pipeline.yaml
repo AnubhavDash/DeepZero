@@ -54,7 +54,7 @@ stages:
   - name: loldrivers_filter
     processor: loldrivers_filter/loldrivers_filter.py
 
-  # decompile with ghidra — install_dir and java_home come from env via ${} expansion
+  # decompile with ghidra - install_dir and java_home come from env via ${} expansion
   - name: decompile
     processor: ghidra_decompile/ghidra_decompile.py
     parallel: 0
@@ -81,7 +81,7 @@ stages:
       keep_top: 10
       sort_order: desc
 
-  # llm deep analysis — only the top 10 survivors
+  # llm deep analysis - only the top 10 survivors
   - name: assess
     processor: generic_llm
     parallel: 2

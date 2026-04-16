@@ -7,7 +7,7 @@ from deepzero.engine.stage import IngestProcessor, Sample, ProcessorContext
 
 
 class FileDiscovery(IngestProcessor):
-    description = "generic file discovery — finds files by extension, no format parsing"
+    description = "generic file discovery - finds files by extension, no format parsing"
 
     def process(self, ctx: ProcessorContext, target: Path) -> list[Sample]:
         extensions = self.config.get("extensions", [])

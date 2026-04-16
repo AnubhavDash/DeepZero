@@ -6,7 +6,7 @@ from deepzero.engine.stage import MapProcessor, ProcessorContext, ProcessorResul
 
 
 class MetadataFilter(MapProcessor):
-    description = "generic metadata condition evaluator — checks field equality, min/max thresholds, dedup"
+    description = "generic metadata condition evaluator - checks field equality, min/max thresholds, dedup"
 
     def __init__(self, spec: StageSpec):
         super().__init__(spec)

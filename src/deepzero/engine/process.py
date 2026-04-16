@@ -47,11 +47,11 @@ def kill_process_tree(proc: subprocess.Popen) -> None:
         else:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except (OSError, ProcessLookupError) as exc:
-        log.debug("process tree kill skipped — pid %d already gone: %s", proc.pid, exc)
+        log.debug("process tree kill skipped - pid %d already gone: %s", proc.pid, exc)
     except subprocess.TimeoutExpired:
-        log.warning("taskkill timed out for pid %d — process may be orphaned", proc.pid)
+        log.warning("taskkill timed out for pid %d - process may be orphaned", proc.pid)
 
     try:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        log.warning("process %d did not exit within 5s after kill — abandoning", proc.pid)
+        log.warning("process %d did not exit within 5s after kill - abandoning", proc.pid)

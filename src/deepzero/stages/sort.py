@@ -6,7 +6,7 @@ from deepzero.engine.stage import Sample, ReduceProcessor, ProcessorEntry, Proce
 
 
 class Sort(ReduceProcessor):
-    description = "sorts active samples by an upstream data field — preserves all samples, changes processing order"
+    description = "sorts active samples by an upstream data field - preserves all samples, changes processing order"
 
     @dataclass
     class Config:

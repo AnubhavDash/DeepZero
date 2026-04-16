@@ -8,7 +8,7 @@ from deepzero.engine.stage import MapProcessor, ProcessorContext, ProcessorResul
 
 
 class GenericCommand(MapProcessor):
-    description = "runs any external command as a pipeline stage — the universal escape hatch"
+    description = "runs any external command as a pipeline stage - the universal escape hatch"
 
     def process(self, ctx: ProcessorContext, entry: ProcessorEntry) -> ProcessorResult:
         run_template = self.config.get("run", "")
