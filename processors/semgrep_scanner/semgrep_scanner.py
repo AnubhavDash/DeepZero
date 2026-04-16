@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -58,12 +58,29 @@ class SemgrepScanner(BulkMapProcessor):
             return [r for r in results if r is not None]
 
         bulk_dir = entries[0].sample_dir.parent.parent / ".bulk_temp" / "semgrep"
+        file_to_sample = self._build_bulk_dir(uncached_entries, bulk_dir, target_subdir)
+
+        if not file_to_sample:
+            for idx, _entry in uncached_entries:
+                results[idx] = ProcessorResult.ok(
+                    data={"finding_count": 0, "findings_cached": False},
+                )
+            self._cleanup_bulk_dir(bulk_dir)
+            return [r for r in results if r is not None]
+
+        try:
+            return asyncio.run(self._run_and_distribute(
+                rules_path, bulk_dir, timeout, uncached_entries, file_to_sample, results, min_findings
+            ))
+        finally:
+            self._cleanup_bulk_dir(bulk_dir)
+
+    def _build_bulk_dir(self, uncached_entries: list[tuple[int, Sample]], bulk_dir: Path, target_subdir: str) -> dict[str, int]:
         if bulk_dir.exists():
             shutil.rmtree(bulk_dir, ignore_errors=True)
         bulk_dir.mkdir(parents=True, exist_ok=True)
 
         file_to_sample: dict[str, int] = {}
-
         for idx, entry in uncached_entries:
             scan_dir = entry.sample_dir / target_subdir
             for src_file in scan_dir.rglob("*"):
@@ -78,15 +95,15 @@ class SemgrepScanner(BulkMapProcessor):
                 except OSError:
                     shutil.copy2(src_file, dest)
                 file_to_sample[dest_name] = idx
+        return file_to_sample
 
-        if not file_to_sample:
-            for idx, _entry in uncached_entries:
-                results[idx] = ProcessorResult.ok(
-                    data={"finding_count": 0, "findings_cached": False},
-                )
-            self._cleanup_bulk_dir(bulk_dir)
-            return [r for r in results if r is not None]
-
+    async def _run_and_distribute(
+        self, rules_path: Path, bulk_dir: Path, timeout: int,
+        uncached_entries: list[tuple[int, Sample]],
+        file_to_sample: dict[str, int],
+        results: list[ProcessorResult | None],
+        min_findings: int
+    ) -> list[ProcessorResult]:
         cmd = [
             "semgrep", "scan",
             "--config", str(rules_path),
@@ -101,34 +118,43 @@ class SemgrepScanner(BulkMapProcessor):
         self.log.info("bulk scanning %d files from %d samples", len(file_to_sample), len(uncached_entries))
 
         try:
-            proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
-        except FileNotFoundError:
-            self._cleanup_bulk_dir(bulk_dir)
+            proc = await asyncio.create_subprocess_exec(
+                cmd[0], *cmd[1:],
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except OSError:
             for idx, _ in uncached_entries:
                 results[idx] = ProcessorResult.fail("semgrep not installed - pip install semgrep")
             return [r for r in results if r is not None]
-        except subprocess.TimeoutExpired:
-            self._cleanup_bulk_dir(bulk_dir)
+        except asyncio.TimeoutError:
             for idx, _ in uncached_entries:
                 results[idx] = ProcessorResult.fail(f"semgrep batch timed out after {timeout}s")
             return [r for r in results if r is not None]
 
         if proc.returncode not in (0, 1):
-            err = proc.stderr.decode("utf-8", errors="replace")[:500]
-            self._cleanup_bulk_dir(bulk_dir)
+            err = stderr_bytes.decode("utf-8", errors="replace")[:500]
             for idx, _ in uncached_entries:
                 results[idx] = ProcessorResult.fail(f"semgrep error: {err}")
             return [r for r in results if r is not None]
 
         try:
-            out_str = proc.stdout.decode("utf-8", errors="replace")
+            out_str = stdout_bytes.decode("utf-8", errors="replace")
             output = json.loads(out_str) if out_str.strip() else {}
         except json.JSONDecodeError:
-            self._cleanup_bulk_dir(bulk_dir)
             for idx, _ in uncached_entries:
                 results[idx] = ProcessorResult.fail("failed to parse semgrep json output")
             return [r for r in results if r is not None]
 
+        self._distribute_findings(output, file_to_sample, uncached_entries, results, min_findings)
+        return [r for r in results if r is not None]
+
+    def _distribute_findings(
+        self, output: dict[str, Any], file_to_sample: dict[str, int],
+        uncached_entries: list[tuple[int, Sample]],
+        results: list[ProcessorResult | None], min_findings: int
+    ) -> None:
         sev_map = {"ERROR": "HIGH", "WARNING": "MEDIUM", "INFO": "LOW"}
         per_sample_findings: dict[int, list[dict]] = {idx: [] for idx, _ in uncached_entries}
 
@@ -160,16 +186,13 @@ class SemgrepScanner(BulkMapProcessor):
                 os.write(fd, json.dumps(findings, indent=2).encode("utf-8"))
                 os.close(fd)
                 os.replace(tmp, str(findings_path))
-            except OSError:
+            except OSError as exc:
                 try:
                     os.close(fd)
                 except OSError:
-                    pass
-                self.log.debug("failed to write findings for %s", entry.sample_id)
+                    self.log.debug("cleanup of failed temp json ignored")
+                self.log.debug("failed to write findings for %s: %s", entry.sample_id, exc)
             results[idx] = self._make_result(findings, min_findings, cached=False)
-
-        self._cleanup_bulk_dir(bulk_dir)
-        return [r for r in results if r is not None]
 
     def _make_result(self, findings: list[dict], min_findings: int, cached: bool) -> ProcessorResult:
         data: dict[str, Any] = {"finding_count": len(findings), "findings_cached": cached}

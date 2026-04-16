@@ -61,17 +61,12 @@ class TestGenericCommand:
         processor = GenericCommand(spec)
         ctx, entry = self._make_ctx(tmp_path, spec.config)
         
-        # mock subprocess
-        import subprocess
-        class MockResult:
-            returncode = 0
-            stdout = b"test.sys is mapped\n"
-            stderr = b""
+        def mock_run_async(self_obj, cmd_list, timeout, cwd):
+            async def _inner():
+                return 0, b"test.sys is mapped\n", b""
+            return _inner()
             
-        def mock_run(*args, **kwargs):
-            return MockResult()
-            
-        monkeypatch.setattr(subprocess, "run", mock_run)
+        monkeypatch.setattr(GenericCommand, "_run_async", mock_run_async)
         
         result = processor.process(ctx, entry)
         assert result.verdict == "continue"
@@ -85,17 +80,12 @@ class TestGenericCommand:
         processor = GenericCommand(spec)
         ctx, entry = self._make_ctx(tmp_path, spec.config)
         
-        # mock subprocess
-        import subprocess
-        class MockResult:
-            returncode = 1
-            stdout = b""
-            stderr = b"command not found"
+        def mock_run_async(self_obj, cmd_list, timeout, cwd):
+            async def _inner():
+                return 1, b"", b"command not found"
+            return _inner()
             
-        def mock_run(*args, **kwargs):
-            return MockResult()
-            
-        monkeypatch.setattr(subprocess, "run", mock_run)
+        monkeypatch.setattr(GenericCommand, "_run_async", mock_run_async)
         
         result = processor.process(ctx, entry)
         assert result.status == "failed"

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import asyncio
 import os
 import subprocess  # nosec B404
 import sys

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import subprocess
+import asyncio
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from deepzero.engine.process import kill_process_tree, run_subprocess_with_kill
+from deepzero.engine.process import _kill_process_tree, run_subprocess_with_kill
 
 
 class TestRunSubprocessWithKill:
@@ -34,7 +34,7 @@ class TestRunSubprocessWithKill:
         assert b"oops" in stderr
 
     def test_timeout_raises(self):
-        with pytest.raises(subprocess.TimeoutExpired):
+        with pytest.raises(RuntimeError):
             run_subprocess_with_kill(
                 [sys.executable, "-c", "import time; time.sleep(60)"],
                 timeout=1,
@@ -53,7 +53,7 @@ class TestRunSubprocessWithKill:
         import os
         env = {**os.environ, "DEEPZERO_TEST_VAR": "test_val_123"}
         rc, stdout, _ = run_subprocess_with_kill(
-            [sys.executable, "-c", "import os; print(os.environ['DEEPZERO_TEST_VAR'])"],
+            [sys.executable, "-c", "import os; print(os.environ.get('DEEPZERO_TEST_VAR', ''))"],
             timeout=10,
             env=env,
         )
@@ -61,41 +61,49 @@ class TestRunSubprocessWithKill:
         assert b"test_val_123" in stdout
 
 
+@pytest.mark.asyncio
 class TestKillProcessTree:
-    def test_kill_already_exited(self):
+    async def test_kill_already_exited(self):
         # process that exits immediately
-        proc = subprocess.Popen(
-            [sys.executable, "-c", "pass"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", "pass",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        proc.wait()
+        await proc.wait()
         # should not raise even though process is already dead
-        kill_process_tree(proc)
+        await _kill_process_tree(proc)
 
-    @patch("deepzero.engine.process.subprocess.run")
-    def test_kill_on_windows(self, mock_run):
+    @patch("deepzero.engine.process.asyncio.create_subprocess_exec")
+    async def test_kill_on_windows(self, mock_create):
+        # mock taskkill process
+        mock_kproc = AsyncMock()
+        mock_kproc.communicate.return_value = (b"", b"")
+        mock_create.return_value = mock_kproc
+
+        # simulated target process
         proc = MagicMock()
         proc.pid = 12345
-        proc.wait.return_value = None
+        proc.wait = AsyncMock(return_value=None)
 
         with patch("deepzero.engine.process.sys") as mock_sys:
             mock_sys.platform = "win32"
-            kill_process_tree(proc)
+            await _kill_process_tree(proc)
 
-        mock_run.assert_called_once()
-        call_args = mock_run.call_args[0][0]
+        mock_create.assert_called_once()
+        call_args = mock_create.call_args[0]
         assert r"C:\Windows\System32\taskkill.exe" in call_args
         assert str(12345) in call_args
 
-    @patch("deepzero.engine.process.subprocess.run", side_effect=OSError("no such process"))
-    def test_kill_handles_os_error(self, mock_run):
-        # on windows, taskkill raises OSError if process is gone
+    @patch("deepzero.engine.process.asyncio.create_subprocess_exec", side_effect=OSError("no such process"))
+    async def test_kill_handles_os_error(self, mock_create):
+        # on windows, taskkill creation might raise OSError if path is broken
         proc = MagicMock()
         proc.pid = 99999
-        proc.wait.return_value = None
+        proc.wait = AsyncMock(return_value=None)
 
         with patch("deepzero.engine.process.sys") as mock_sys:
             mock_sys.platform = "win32"
-            # should not raise - OSError is caught
-            kill_process_tree(proc)
+            # should not raise - OSError is caught locally or at asyncio level
+            await _kill_process_tree(proc)
+

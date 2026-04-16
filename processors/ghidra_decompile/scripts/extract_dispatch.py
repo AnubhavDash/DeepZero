@@ -122,15 +122,11 @@ def find_dispatch_assignment(decomp, driver_entry=None):
         try:
             for called in driver_entry.getCalledFunctions(getMonitor()):
                 priority_funcs.append(called)
-                # also grab one level deeper ΓÇö some drivers have DriverEntry -> InitDevice -> SetupDispatch
-                try:
-                    for sub in called.getCalledFunctions(getMonitor()):
-                        priority_funcs.append(sub)
-                except Exception as exc:
-                    print("ghidra warning: failed to resolve deeper callees in " + called.getName() + ":", str(exc))
-                    continue
+                # also grab one level deeper - some drivers have DriverEntry -> InitDevice -> SetupDispatch
+                for sub in called.getCalledFunctions(getMonitor()):
+                    priority_funcs.append(sub)
         except Exception as exc:
-            print("ghidra warning: failed to enumerate callees from driver entry:", str(exc))
+            raise RuntimeError("ghidra structural failure: failed to enumerate callees from driver entry: " + str(exc))
 
     seen_addrs = set()
     for func in priority_funcs:
@@ -177,21 +173,18 @@ def extract_ioctl_codes(decompiled_c):
     hex_pattern = r'(?:==|case)\s*(-?0x[0-9a-fA-F]+|-?\d{6,10})'
     for match in re.finditer(hex_pattern, decompiled_c):
         raw_val = match.group(1).lower()
-        try:
-            if raw_val.startswith('0x') or raw_val.startswith('-0x'):
-                code = int(raw_val, 16)
-            else:
-                code = int(raw_val, 10)
-                
-            # Convert signed 32-bit negatives back to 32-bit unsigned uint32 representation
-            if code < 0:
-                code = code & 0xFFFFFFFF
-                
-            # basic sanity: ioctl codes have device type in upper 16 bits
-            if (code >> 16) > 0 and (code >> 16) < 0xFFFF:
-                codes.append(code)
-        except ValueError:
-            pass  # non-ioctl numeric constant, skip
+        if raw_val.startswith('0x') or raw_val.startswith('-0x'):
+            code = int(raw_val, 16)
+        else:
+            code = int(raw_val, 10)
+            
+        # Convert signed 32-bit negatives back to 32-bit unsigned uint32 representation
+        if code < 0:
+            code = code & 0xFFFFFFFF
+            
+        # basic sanity: ioctl codes have device type in upper 16 bits
+        if (code >> 16) > 0 and (code >> 16) < 0xFFFF:
+            codes.append(code)
 
     return sorted(set(codes))
 
@@ -199,10 +192,7 @@ def extract_ioctl_codes(decompiled_c):
 def main():
     output_dir = os.environ.get("DEEPZERO_OUTPUT_DIR", ".")
     if not os.path.exists(output_dir):
-        try:
-            os.makedirs(output_dir)
-        except OSError:
-            pass  # output dir may already exist or be created by ghidra
+        os.makedirs(output_dir)
 
     decomp = get_decompiler()
     result = {"success": False, "error": "", "driver_entry_c": "",
@@ -287,7 +277,7 @@ def main():
                         subfuncs_c.append(c)
                         get_subfuncs(called, depth + 1)
         except Exception as exc:
-            print("ghidra warning: failed to decompile or resolve calls:", str(exc))
+            raise RuntimeError("ghidra structural failure: failed to decompile or resolve calls: " + str(exc))
 
     get_subfuncs(dispatch_func)
     
@@ -306,10 +296,7 @@ def main():
     # create ioctls subdirectory
     ioctls_dir = os.path.join(output_dir, "ioctls")
     if not os.path.exists(ioctls_dir):
-        try:
-            os.makedirs(ioctls_dir)
-        except OSError:
-            pass  # may already exist
+        os.makedirs(ioctls_dir)
 
     for code in ioctl_codes:
         handler_info = {
