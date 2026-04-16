@@ -221,7 +221,7 @@ def status(pipeline: str | None, work_dir: str | None, verbose: bool):
         except ValueError as e:
             console.print(f"[bold red]X ERROR[/]: {e}")
             raise SystemExit(1)
-            
+
         work_path = pipeline_def.work_dir
     else:
         console.print("[red]specify --pipeline or --work-dir[/]")
@@ -248,10 +248,10 @@ def status(pipeline: str | None, work_dir: str | None, verbose: bool):
     if run_state.completed_at:
         console.print(f"  completed: {run_state.completed_at}")
 
-    _print_stats(run_state)
+    manifest = state_store.load_manifest()
+    _print_stats(run_state, manifest)
 
     # show manifest summary
-    manifest = state_store.load_manifest()
     if manifest:
         verdicts: dict[str, int] = {}
         for entry in manifest:
@@ -443,8 +443,29 @@ def serve(host: str, port: int, work_dir: str):
     uvicorn.run(app, host=host, port=port)
 
 
-def _print_stats(run_state) -> None:
-    per_stage = run_state.stats.get("per_stage", {})
+def _print_stats(run_state, manifest: list[dict[str, Any]] | None = None) -> None:
+    per_stage: dict[str, dict[str, int]] = {}
+
+    if manifest:
+        for entry in manifest:
+            history = entry.get("history", {})
+            for stage_name, stage_data in history.items():
+                if stage_name not in per_stage:
+                    per_stage[stage_name] = {"completed": 0, "filtered": 0, "failed": 0}
+
+                st = stage_data.get("status")
+                vd = stage_data.get("verdict")
+
+                if st == "failed":
+                    per_stage[stage_name]["failed"] += 1
+                elif st == "filtered" or (st == "completed" and vd == "filter"):
+                    per_stage[stage_name]["filtered"] += 1
+                elif st == "completed":
+                    per_stage[stage_name]["completed"] += 1
+
+    if not per_stage:
+        per_stage = run_state.stats.get("per_stage", {})
+
     if not per_stage:
         discovered = run_state.stats.get("discovered", 0)
         if discovered:
