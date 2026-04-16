@@ -44,7 +44,7 @@ class _ShortNameFormatter(logging.Formatter):
             record.exc_info = None
             record.exc_text = None
 
-        record.msg = f"{short:>20} | {record.msg}"
+        record.msg = f"({short}) {record.msg}"
         return super().format(record)
 
 
@@ -56,6 +56,7 @@ def _setup_logging(verbose: bool) -> None:
         show_path=False,
         show_level=False,
         show_time=True,
+        log_time_format="%H:%M:%S",
     )
     handler.setFormatter(_ShortNameFormatter("%(message)s"))
     logging.basicConfig(level=level, handlers=[handler])
