@@ -9,6 +9,7 @@ from typing import Any
 import click
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.markup import escape
 from rich.table import Table
 
 from deepzero.engine.types import RunStatus
@@ -22,6 +23,17 @@ _LOG_PREFIX_MAP: MappingProxyType[str, str] = MappingProxyType(
         "deepzero.runner": "engine",
         "deepzero.pipeline": "pipeline",
     }
+)
+
+_LOG_COLORS: tuple[str, ...] = (
+    "cyan",
+    "magenta",
+    "green",
+    "yellow",
+    "bright_cyan",
+    "bright_magenta",
+    "bright_green",
+    "bright_yellow",
 )
 
 
@@ -45,23 +57,12 @@ class _ShortNameFormatter(logging.Formatter):
             record.exc_text = None
 
         msg = super().format(record)
-        from rich.markup import escape
 
         msg_escaped = escape(msg)
 
-        colors = [
-            "cyan",
-            "magenta",
-            "green",
-            "yellow",
-            "bright_cyan",
-            "bright_magenta",
-            "bright_green",
-            "bright_yellow",
-        ]
         import zlib
 
-        color = colors[zlib.crc32(short.encode("utf-8")) % len(colors)]
+        color = _LOG_COLORS[zlib.crc32(short.encode("utf-8")) % len(_LOG_COLORS)]
 
         # format dynamically and override the final payload that RichHandler receives
         return f"[{color}]\\[{short}][/{color}] {msg_escaped}"
@@ -230,13 +231,13 @@ def status(pipeline: str | None, work_dir: str | None, verbose: bool):
     """show current pipeline run status"""
     from deepzero.engine.state import StateStore
 
+    _setup_logging(verbose)
     if work_dir:
         work_path = Path(work_dir)
     elif pipeline:
         import deepzero.stages  # noqa: F401
         from deepzero.engine.pipeline import load_pipeline
 
-        _setup_logging(False)
         _load_env()
         try:
             pipeline_def = load_pipeline(pipeline)
