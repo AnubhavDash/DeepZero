@@ -329,10 +329,10 @@ def main():
 
     # append subfunctions to the dispatch text so they are included in all output files
     if subfuncs_c:
-        dispatch_c += u"\n\n// " + u"=" * 40 + u" //\n"
-        dispatch_c += u"//   INTERNAL SUBFUNCTIONS CALLED BY DISPATCH   //\n"
-        dispatch_c += u"// " + u"=" * 40 + u" //\n\n"
-        dispatch_c += u"\n\n".join(subfuncs_c)
+        dispatch_c += "\n\n// " + "=" * 40 + " //\n"
+        dispatch_c += "//   INTERNAL SUBFUNCTIONS CALLED BY DISPATCH   //\n"
+        dispatch_c += "// " + "=" * 40 + " //\n\n"
+        dispatch_c += "\n\n".join(subfuncs_c)
 
     # write full decompiled payload
     result["dispatch_c"] = dispatch_c
@@ -360,10 +360,10 @@ def main():
         # write per-ioctl file
         # FIX: Use io.open with utf-8 encoding and unicode() cast for Jython stability
         with io.open(os.path.join(ioctls_dir, "0x%08X.c" % code), "w", encoding="utf-8") as f:
-            f.write(u"// IOCTL Code: 0x%08X\n" % code)
-            f.write(u"// Method: %d\n" % (code & 0x3))
-            f.write(u"// Device Type: 0x%04X\n" % ((code >> 16) & 0xFFFF))
-            f.write(u"// Function: 0x%03X\n\n" % ((code >> 2) & 0xFFF))
+            f.write("// IOCTL Code: 0x%08X\n" % code)
+            f.write("// Method: %d\n" % (code & 0x3))
+            f.write("// Device Type: 0x%04X\n" % ((code >> 16) & 0xFFFF))
+            f.write("// Function: 0x%03X\n\n" % ((code >> 2) & 0xFFF))
             f.write(unicode(dispatch_c))
 
     result["success"] = True
