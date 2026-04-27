@@ -4,10 +4,10 @@
 # runs inside ghidra's jython environment via analyzeHeadless -postScript
 # ruff: noqa: F821
 
+import io  # Added for stable UTF-8 file writing
 import json
 import os
 import re
-import io  # Added for stable UTF-8 file writing
 
 from ghidra.app.decompiler import DecompileOptions, DecompInterface
 
